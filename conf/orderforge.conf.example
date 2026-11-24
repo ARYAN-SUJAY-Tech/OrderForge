@@ -1,0 +1,15 @@
+# OrderForge configuration (example).
+# Copy to conf/orderforge.conf (scripts/setup-db.sh does this) and keep it mode 0600.
+# The real file holds secrets and is git-ignored.
+
+# ---- MySQL
+db.host     = localhost
+db.port     = 3306
+db.user     = orderforge
+db.password = CHANGE_ME
+db.name     = orderforge
+# Leave db.socket unset to use the client default (/var/run/mysqld/mysqld.sock).
+
+# ---- logging
+log.dir   = run/log
+log.level = info

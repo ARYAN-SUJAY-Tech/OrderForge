@@ -1,0 +1,25 @@
+# build output
+build/
+*.o
+*.a
+*.d
+
+# runtime state
+run/
+*.wal
+*.pid
+*.log
+
+# secrets: only the .example is committed
+conf/orderforge.conf
+
+# benchmark raw output (charts and summaries are committed under docs/)
+bench-results/
+
+# local Claude Code context (kept out of the repo)
+CLAUDE.md
+
+# editors
+.vscode/
+.idea/
+*.swp

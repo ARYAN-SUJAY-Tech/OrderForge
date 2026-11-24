@@ -67,6 +67,7 @@ STORE_OBJ  := $(STORE_SRC:%.c=$(BUILD)/%.o)
 LIBSTORE   := $(BUILD)/libofstore.a
 STORE_LIBS := $(LIBSTORE) $(LIBCOMMON) $(MYSQL_LIBS) $(SODIUM_LIBS)
 $(STORE_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+$(COMMON_OBJ): CFLAGS += $(SODIUM_CFLAGS)
 
 # ---------------------------------------------------------------- daemons and tools
 API_SRC := $(wildcard src/api/*.c)
@@ -77,10 +78,16 @@ CORE_SRC := $(wildcard src/core/*.c)
 CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o)
 BENCH_SRC := $(wildcard src/bench/*.c)
 BENCH_OBJ := $(BENCH_SRC:%.c=$(BUILD)/%.o)
+PAY_SRC := $(wildcard src/pay/*.c)
+PAY_OBJ := $(PAY_SRC:%.c=$(BUILD)/%.o)
+REPORT_SRC := $(wildcard src/report/*.c)
+REPORT_OBJ := $(REPORT_SRC:%.c=$(BUILD)/%.o)
 $(API_OBJ): CFLAGS += $(FCGI_CFLAGS)
-$(CTL_OBJ) $(CORE_OBJ) $(BENCH_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+$(CTL_OBJ) $(CORE_OBJ) $(BENCH_OBJ) $(REPORT_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+$(PAY_OBJ): CFLAGS += $(SODIUM_CFLAGS)
 
-BINS := $(BUILD)/of-core $(BUILD)/of-api $(BUILD)/of-ctl $(BUILD)/of-bench
+BINS := $(BUILD)/of-core $(BUILD)/of-api $(BUILD)/of-pay $(BUILD)/of-report \
+        $(BUILD)/of-ctl $(BUILD)/of-bench
 
 # ---------------------------------------------------------------- tests
 TEST_SRC := $(wildcard tests/unit/test_*.c)
@@ -126,6 +133,13 @@ $(BUILD)/of-api: $(API_OBJ) $(LIBCOMMON)
 $(BUILD)/of-core: $(CORE_OBJ) $(LIBSTORE) $(LIBCOMMON)
 	$(CC) $(CORE_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
 
+# of-pay needs no database: only the message queues and libsodium for the HMAC.
+$(BUILD)/of-pay: $(PAY_OBJ) $(LIBCOMMON)
+	$(CC) $(PAY_OBJ) -o $@ $(LDFLAGS) $(LIBCOMMON) $(SODIUM_LIBS) $(LDLIBS)
+
+$(BUILD)/of-report: $(REPORT_OBJ) $(LIBSTORE) $(LIBCOMMON)
+	$(CC) $(REPORT_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
+
 $(BUILD)/of-bench: $(BENCH_OBJ) $(LIBSTORE) $(LIBCOMMON)
 	$(CC) $(BENCH_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
 
@@ -135,7 +149,7 @@ $(BUILD)/of-ctl: $(CTL_OBJ) $(LIBSTORE) $(LIBCOMMON)
 # --- unit tests (no database needed)
 $(BUILD)/tests/%: tests/unit/%.c $(LIBCOMMON)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LIBCOMMON) $(LDLIBS)
+	$(CC) $(CFLAGS) $(SODIUM_CFLAGS) $< -o $@ $(LDFLAGS) $(LIBCOMMON) $(SODIUM_LIBS) $(LDLIBS)
 
 test: $(TEST_BIN)
 	@pass=0; fail=0; \
@@ -175,4 +189,4 @@ clean:
 	rm -rf build
 
 -include $(COMMON_OBJ:.o=.d) $(STORE_OBJ:.o=.d) $(API_OBJ:.o=.d) $(CTL_OBJ:.o=.d) \
-         $(CORE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)
+         $(CORE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(PAY_OBJ:.o=.d) $(REPORT_OBJ:.o=.d)

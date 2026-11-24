@@ -36,7 +36,7 @@
 #include <stdint.h>
 
 #define OF_STOCK_MAGIC 0x4F465354u /* "OFST" */
-#define OF_STOCK_ABI   1
+#define OF_STOCK_ABI   2
 
 typedef struct {
     _Atomic int32_t  available;   /* on hand minus reserved */
@@ -56,6 +56,13 @@ typedef struct {
     _Atomic uint64_t orders_failed;    /* out of stock */
     _Atomic uint64_t cas_retries;      /* lost CAS races in stock_reserve */
     _Atomic uint64_t active_workers;
+    _Atomic uint64_t payments_sent;
+    _Atomic uint64_t payments_succeeded;
+    _Atomic uint64_t payments_declined;
+    _Atomic uint64_t payments_ignored;    /* duplicate or replayed replies */
+    _Atomic uint64_t payments_rejected;   /* bad MAC, stale or replayed nonce */
+    _Atomic uint64_t late_refunds;        /* success arrived after the order expired */
+    _Atomic uint64_t reservations_expired;
 } stock_metrics_t;
 
 typedef struct {

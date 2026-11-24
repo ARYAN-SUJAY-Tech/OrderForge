@@ -61,19 +61,38 @@ The `q` parameter matches the name or SKU. A product object looks like this:
 | GET | `/api/cart` | – | `{items, units, total_paise}` |
 | POST | `/api/cart/items` | `{product_id, qty}` | the cart |
 | DELETE | `/api/cart/items/{product_id}` | – | the cart |
-| POST | `/api/checkout` | – | 201 `{order}`, or 409 `out_of_stock` / `unavailable` |
+| POST | `/api/checkout` | `{payment_method}` (optional) + header `Idempotency-Key` (optional) | 201 `{order}` in `payment_pending`; 200 with the existing order when the key was used before; 409 `out_of_stock` / `unavailable` |
 
 - **Setting a quantity:** `POST /api/cart/items` sets the quantity, from 0 to 100.
   A quantity of 0 removes the line.
 - **Prices:** the server always reads prices from the database. Any price sent by the
   client is ignored.
+- **Payment methods:** mock tokens only. No card data is accepted anywhere.
+
+| Token | What the mock gateway does |
+|---|---|
+| `tok_success` (default) | Approves |
+| `tok_decline` | Declines |
+| `tok_timeout` | Never answers; the order expires after `store.reservation_ttl_s` |
+| `tok_duplicate` | Approves, then sends the same approval again |
+| `tok_slow` | Approves after `pay.slow_ms` |
+| `tok_random` | Random outcome, using the `pay.*_pct` rates |
+
+- **Idempotency-Key:** 8–64 characters from `A-Z a-z 0-9 - _`, scoped to the user.
+  Retrying a checkout with the same key returns the same order and never creates a
+  second one.
+- **After checkout:** the order is `payment_pending` until the gateway answers.
+  - Approved: it becomes `paid`.
+  - Declined, or no answer before the reservation expires: it becomes `cancelled`,
+    and the stock is returned.
 
 ## Orders (user)
 
 | Method | Path | Returns |
 |---|---|---|
 | GET | `/api/orders?page=` | `{orders: [{id, status, total_paise, created_at, units}]}` |
-| GET | `/api/orders/{id}` | `{order: {..., items: [...], events: [...]}}` |
+| GET | `/api/orders/{id}` | `{order: {..., items, events, payment: {status, method, provider_ref, note, amount_paise}, reservation_expires_at?, reservation_seconds_left?}}` |
+| POST | `/api/orders/{id}/cancel` | Cancels an unpaid order, or refunds a paid one that is not yet packed. 409 `not_cancellable` otherwise |
 
 Customers can only see their own orders; anyone else's order returns 404. Admins can
 see every order.
@@ -88,7 +107,10 @@ see every order.
 | DELETE | `/api/admin/products/{id}` | – | soft delete: `active=false`, removed from carts |
 | POST | `/api/admin/products/{id}/stock` | `{delta, reason: "restock" or "adjust"}` | `{product}`; 409 if stock would go below 0 |
 | GET | `/api/admin/orders` | `status`, `page`, `per_page` | `{orders, page, total}` |
-| GET | `/api/admin/system` | – | `{stock_mode, products_in_shm, started_unix, metrics: {requests_total, busy_rejects, queue_depth, orders_total, orders_failed, cas_retries, active_workers}}` |
+| POST | `/api/admin/orders/{id}/status` | `{status: "packed" \| "shipped" \| "delivered" \| "refunded" \| "cancelled", note?}` | `{order}`; 409 `invalid_transition` for a move the state machine forbids |
+| GET | `/api/admin/system` | – | `{stock_mode, reservation_ttl_s, products_in_shm, started_unix, metrics: {requests_total, busy_rejects, queue_depth, orders_total, orders_failed, cas_retries, active_workers, payments_sent, payments_succeeded, payments_declined, payments_ignored, payments_rejected, late_refunds, reservations_expired}}` |
+| GET | `/api/admin/reports` | `days` (1–366, default 30) | `{days, generated_at, generation_ms, age_seconds, daily: [{day, orders, units, revenue_paise}], totals, top_products, order_status, payments, low_stock}` |
+| GET | `/api/admin/reports/export` | `name`: `daily_sales`, `top_products`, `low_stock` or `order_status` | `{name, filename, csv}`: the CSV that of-report last wrote |
 
 Every admin change is recorded in `audit_log`. Every stock change is recorded in
 `stock_movements`.

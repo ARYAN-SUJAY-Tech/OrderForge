@@ -10,36 +10,41 @@ stock is never oversold under concurrent checkout. The project is built around
 operating-system concepts: processes, threads, IPC, shared memory, synchronisation,
 signals and crash recovery.
 
-## 2. Architecture (as built, phase 2)
+## 2. Architecture (as built, phase 3)
 
 ```
 Browser ─HTTP─▶ Apache httpd ─FastCGI (TCP 127.0.0.1:9000)─▶ of-api   (parent + N pre-forked workers)
                 static web/, CSP                                │ one persistent connection per worker
                                                                 ▼ Unix socket, binary frames, SO_PEERCRED
-                                     ┌──────────────────── of-core ────────────────────┐
-                                     │ reactor thread: epoll + signalfd + eventfd       │
-                                     │        │ bounded queue (503 "busy" when full)    │
-                                     │        ▼                                         │
-                                     │ worker threads × N ── own MySQL connection each  │
-                                     │   libofstore: auth, catalogue, cart, checkout,   │
-                                     │   admin; stock modes naive / db-lock / lockfree  │
-                                     └──────┬──────────────────────────────┬────────────┘
-                                            ▼                              ▼
-                              POSIX shm "/orderforge"                MySQL (InnoDB)
-                              stock table + metrics                  durable truth
-                                    ▲ read-only
-                              of-ctl invariants, of-bench
+                    ┌────────────────────────── of-core ──────────────────────────┐
+                    │ reactor thread: epoll + signalfd + eventfd                   │
+                    │      │ bounded job queue (503 "busy" when full)              │
+                    │      ▼                                                       │
+                    │ worker threads × N ── own MySQL connection each              │
+                    │   libofstore: auth, catalogue, cart, checkout, orders,       │      POSIX mqueue
+                    │   admin, reports      │ payment outbox (bounded)             │   /orderforge-pay-req
+                    │                       ▼                                      │ ───────────────▶ of-pay
+                    │ pay-sender thread: HMAC-sign, mq_timedsend                   │   (mock gateway:
+                    │ background thread: epoll over reply queue + timerfd reaper ◀─┼── epoll + timerfd
+                    │                    (own MySQL connection)                    │   + reply heap)
+                    └──────┬──────────────────────────────────┬────────────────────┘ ◀───────────────
+                           ▼                                  ▼                        /orderforge-pay-rep
+             POSIX shm "/orderforge"                    MySQL (InnoDB) ◀──── of-report (timerfd:
+             stock table + metrics                      durable truth        aggregates + CSV via rename)
+                   ▲ read-only
+             of-ctl, of-bench, of-report
 ```
 
 | Process | Role | Talks to |
 |---|---|---|
 | of-api | Turns each FastCGI request into one frame. Has no business logic and no database access, and does not link libmysqlclient or libsodium | Apache (FastCGI), of-core (Unix socket) |
-| of-core | The engine: every request is authenticated, authorised and executed here | of-api, MySQL, shared memory |
+| of-core | The engine: every request is authenticated, authorised and executed here. It also sends payments, applies gateway replies and expires unpaid reservations | of-api, MySQL, shared memory, both payment queues |
+| of-pay | Mock payment gateway. Has no database; links only libsodium for the HMAC | Payment queues |
+| of-report | Periodic sales aggregation and atomic CSV reports | MySQL; shared memory (read-only, for live low-stock figures) |
 | of-ctl | Operator tool: `useradd`, `invariants` | MySQL; shared memory (read-only) |
 | of-bench | Load generator and invariant checker | Apache (HTTP), MySQL; shared memory (read-only) |
 
-*Planned:* of-pay (POSIX message queues) and of-report join in phase 3. The WAL and
-of-supervisor arrive in phase 4.
+*Planned:* the WAL and of-supervisor arrive in phase 4.
 
 ### Why these IPC mechanisms
 
@@ -48,6 +53,7 @@ of-supervisor arrive in phase 4.
 | Apache → of-api | FastCGI over TCP | Workers stay alive between requests, so there is no fork per request |
 | of-api → of-core | Unix domain stream socket with length-prefixed binary frames | Fast and not exposed to the network. The kernel reports the peer's uid (SO_PEERCRED), so the core can refuse other users |
 | of-core ↔ tools | POSIX shared memory with C11 atomics | Live stock and metrics can be read without asking the core; the read-only mapping means tools cannot change stock |
+| of-core ↔ of-pay | Two POSIX message queues, one per direction, fixed-size HMAC-signed messages | Message boundaries are kept (one send is one receive). Queues live in the kernel, so a request sent while of-pay restarts waits instead of being lost. A queue is a pollable descriptor, so it fits in an epoll loop |
 
 ## 3. of-api process model
 
@@ -194,20 +200,179 @@ typedef struct {                  // exactly one 64-byte cache line per product
   reserve stock that is not durable yet.
 - **New products:** added to the table when they are created.
 
-## 7. Data model
+## 7. Orders, payments and reports (phase 3)
 
-The schema is `sql/schema.sql`, unchanged since phase 1:
+### The order state machine (`src/common/order_state.c`)
+
+```
+placed ──▶ payment_pending ──▶ paid ──▶ packed ──▶ shipped ──▶ delivered
+  │              │               │        │
+  └──────────────┴──▶ cancelled  └────────┴──▶ refunded
+```
+
+| Edge | Who may take it |
+|---|---|
+| placed → payment_pending | system (checkout) |
+| placed / payment_pending → cancelled | system (decline, expiry), customer, admin |
+| payment_pending → paid | **system only** (a verified gateway reply) |
+| paid → packed → shipped → delivered | admin |
+| paid → refunded | customer, admin |
+| packed → refunded | admin |
+
+delivered, cancelled and refunded are final. The table is pure C, unit-tested edge by
+edge: all 64 state pairs, and every actor on each edge.
+
+**Every transition is one locked, guarded transaction** (`src/store/flow.c`):
+
+1. `SELECT ... FOR UPDATE` on the order row.
+2. Check the edge and the actor's permission.
+3. Update with a guard: `UPDATE orders SET status = <to> WHERE id = ? AND status = <from>`,
+   and require exactly one changed row.
+4. Append an `order_events` row and apply the side effects.
+5. Commit. Only after the commit is stock returned to shared memory.
+
+**Lock order everywhere:** order row, then payment row, then reservations, then
+inventory rows in ascending product id. Every path takes locks in the same order, so
+no two of them can deadlock.
+
+### Stock across the order's life
+
+Checkout takes the units off `stock_on_hand` immediately, and records them in
+`reservations` with a deadline of `store.reservation_ttl_s`:
+
+| Event | Reservations | Stock |
+|---|---|---|
+| Checkout | `active` | `stock_on_hand -= qty`; ledger `sale` |
+| Paid | `committed` | (sold) |
+| Cancelled: decline, expiry, customer or admin | `released` | `stock_on_hand += qty`; ledger `release`; shared memory `+= qty` after the commit |
+| Refunded | `released` | `stock_on_hand += qty`; ledger `refund`; shared memory `+= qty` after the commit |
+
+*Deviation from the plan:* the plan reduced `stock_on_hand` only at payment time. Taking
+it at checkout instead means:
+
+- MySQL always holds the true number of sellable units.
+- The ledger invariant (`SUM(delta) = stock_on_hand`) and the shared-memory check
+  (`available = stock_on_hand`) stay simple, and hold at every moment.
+- Every exit path gives the stock back explicitly.
+
+### Payments: of-core ⇄ of-pay
+
+```
+checkout tx commits ──▶ outbox (bounded) ──▶ pay-sender: pay_sign() + mq_timedsend ──▶ of-pay
+of-pay: verify MAC + nonce, decide by token, schedule reply on a min-heap, timerfd fires,
+        pay_sign() + mq_send ──▶ background thread: verify MAC + nonce ──▶ store_payment_reply()
+```
+
+- **Message** (`src/common/paymsg.h`): a fixed 184-byte struct containing the order,
+  amount, idempotency key, method token, provider reference, a random 64-bit nonce and
+  a timestamp. HMAC-SHA256 covers every byte before the MAC, using the shared secret
+  `pay.hmac_key`.
+- **Checking a message:** both ends verify the MAC with libsodium's constant-time
+  compare. They also reject a timestamp more than 5 minutes off and any nonce seen
+  among the last 4,096 messages.
+  - Unit tests flip every byte of a signed message, forge "declined → succeeded", use
+    the wrong key and unterminated strings, and replay messages. All are rejected.
+- **The kernel limit:** an unprivileged process can hold at most
+  `/proc/sys/fs/mqueue/msg_max` messages (10) in a queue.
+  - Workers never call `mq_send`. They push to a bounded in-memory outbox, and the
+    sender thread blocks while the queue is full.
+  - The sender waits with a 1 s timeout, so shutdown never hangs. Once stopping, it
+    tries each message only once; measured shutdown with of-pay absent was 0.7 s.
+  - If the outbox is full, the order is not lost: it waits, and the reaper cancels it.
+- **of-pay is single-threaded.** One epoll loop watches the request queue (pollable on
+  Linux), a timerfd always armed for the earliest due reply, and a signalfd.
+  - Replies wait in a min-heap ordered by due time, so hundreds of payments can be "in
+    progress" with no extra threads.
+  - The method token decides the outcome: `tok_success`, `tok_decline`, `tok_timeout`
+    (never answers), `tok_duplicate` (the same approval twice), `tok_slow` (answers
+    after the TTL), or `tok_random` (configured mix).
+  - A repeated idempotency key gets the same outcome and reference.
+- **Applying a reply** (`src/store/payments.c`, on the background thread with its own
+  MySQL connection). It locks the order, then the payment row, then:
+
+| Payment row is | Order is | Reply | Effect |
+|---|---|---|---|
+| pending | payment_pending | approved | payment `succeeded`, order `paid`, reservations committed |
+| pending | payment_pending | declined | payment `declined`, order `cancelled`, stock returned |
+| timed_out / cancelled | cancelled | approved | **late success:** payment `refunded` automatically, timeline note, `audit_log` row, `late_refunds` metric |
+| anything else | – | any | duplicate or replay: ignored, `payments_ignored` metric |
+
+- **The expiry reaper:** a timerfd in the same epoll loop, every
+  `core.reaper_interval_ms`.
+  - It finds orders that have `active` reservations past `expires_at`, using the index
+    on `(state, expires_at)`.
+  - Each one is cancelled through the same locked, guarded path, with the payment
+    marked `timed_out`.
+  - When a late reply and the reaper race, the guarded update lets exactly one win;
+    the loser takes the "already decided" branch.
+
+### Idempotent checkout
+
+- **The key:** the browser sends `Idempotency-Key: <32 hex>`. It carries the same key
+  on retries after a network failure, and uses a new key after any answer from the
+  server.
+- **Protocol:** the key travels in the binary protocol (version 2 added the field).
+- **Storage:** the key is scoped to the user (`u<id>:<key>`) and stored in
+  `orders.idempotency_key`, which has a UNIQUE index.
+- **A retry** finds the existing order and answers 200 with it, so nothing is created
+  twice. Two simultaneous retries both pass the first lookup, but the second INSERT
+  violates the UNIQUE index. That request rolls back, returns its shared-memory
+  reservation, and answers with the winner's order.
+- **Payments** are idempotent the same way: `payments.idem_key` is UNIQUE, and of-pay
+  remembers outcomes by key.
+
+### Reports (of-report)
+
+- **Schedule:** a timerfd every `report.interval_s` seconds, and SIGHUP for "now".
+- **Aggregates:** in one transaction, of-report deletes and re-inserts the last
+  `report.days` days of `daily_sales` and `product_sales_daily`. These cover paid,
+  packed, shipped and delivered orders. The run is recorded in `report_meta`.
+- **CSV files:** daily sales, top products, low stock and order status. The low-stock
+  report includes the **live** available count from shared memory.
+- **Atomic replace:** each file is written to a temporary file, `fsync()`ed, renamed
+  over the old one with `rename()`, and then the directory is `fsync()`ed. The export
+  API therefore never reads a half-written report, and a new report survives a power
+  cut.
+- **Export safety:** `/api/admin/reports/export` accepts only the four fixed names, so
+  no part of the request ever reaches `open()` as a path. It also opens with
+  `O_NOFOLLOW` and caps the size at 1 MiB.
+- **The dashboard** (`web/admin/reports.html`) shows:
+  - revenue, orders, units and average order value;
+  - a daily-revenue bar chart with a hover tooltip and a table view;
+  - top products, low stock, and live order and payment counts;
+  - a system-health panel polling the shared-memory metrics every 2 s.
+
+### Failure handling, as built and tested
+
+| Failure | What happens | Test |
+|---|---|---|
+| Payment declined | Order cancelled, payment declined, stock returned | payment_test |
+| Gateway never answers | Reaper cancels at the TTL, payment `timed_out`, stock returned | payment_test |
+| Duplicate or replayed callback | Exactly one effect; the second reply is counted and ignored | payment_test, unit |
+| Forged reply (bad MAC) | Dropped before it touches the database; `payments_rejected` metric | unit (paymsg) |
+| Approval after the order expired | Refunded automatically and audited; stock not returned twice | payment_test |
+| Customer retries checkout | The same Idempotency-Key returns the same order (200) | payment_test |
+| of-pay down | Requests wait in the kernel queue (or the outbox); unpaid orders expire; core shutdown stays fast | manual |
+| Illegal transition | 409 `invalid_transition`; nothing changes | payment_test, unit |
+
+## 8. Data model
+
+The schema is `sql/schema.sql`:
 
 - users, sessions (SHA-256 of the token only), categories, products (soft delete)
 - inventory (`CHECK stock_on_hand >= 0`), carts, cart_items
-- orders (status CHECK), order_items (unit price copied at purchase)
+- orders (status CHECK, user-scoped unique idempotency key), order_items (unit price
+  copied at purchase)
 - order_events (append-only timeline), stock_movements (ledger), audit_log
+- *phase 3:* reservations (`(state, expires_at)` index for the reaper); payments
+  (unique idempotency key; pending, succeeded, declined, timed_out, cancelled or
+  refunded); daily_sales, product_sales_daily, report_meta (written by of-report)
 
 **Invariant:** for every product, `SUM(stock_movements.delta) = stock_on_hand >= 0`.
 In lockfree-shm mode, while no checkout is in flight, it must also hold that
 shared-memory `available = stock_on_hand` and `reserved = 0`.
 
-## 8. Security
+## 9. Security
 
 Security is enforced in of-core, so of-api cannot bypass it.
 
@@ -233,7 +398,20 @@ Phase 2 adds:
 - **Smaller front end:** of-api links no database or crypto library.
 - **Read-only tools:** tools map shared memory read-only.
 
-## 9. Results so far
+Phase 3 adds:
+
+- **Signed payment messages:** HMAC-SHA256 in both directions, compared in constant
+  time, with nonce and timestamp replay protection. The secret is in the 0600 config
+  file and is generated by `setup-db.sh`.
+- **Only the gateway can mark an order paid:** the state machine gives that edge to
+  the system actor only. Admins and customers get 409.
+- **No card data:** checkout sends a test token.
+- **Smaller gateway:** of-pay has no database access and links only libsodium.
+- **Report export:** a whitelist of names and `O_NOFOLLOW`.
+- **Audit:** every cancellation, refund, status change and automatic refund is written
+  to `audit_log`.
+
+## 10. Results so far
 
 ### Gate 1 (phase 1)
 
@@ -280,11 +458,24 @@ Both runs used the 1,000-buyer rush plus the 56-check API suite:
 - **ThreadSanitizer** build of of-core: no reports.
 - **AddressSanitizer** build: no errors, and no leaks at shutdown.
 
-## 10. Testing
+### Gate 3 (phase 3): every Tier 1 feature end to end
+
+- **Payments:** `tests/integration/payment_test.sh` passes 56/56. It covers all five
+  gateway behaviours, idempotent checkout, customer cancel and refund, the full admin
+  fulfilment flow, illegal transitions, stock returns and the reports API.
+- **Rush with payments:** gate 2 still holds with payments flowing. 1,000 buyers for
+  50 units gave 50 orders and 0 oversold. All 50 went through the 10-message queues
+  via the outbox and were paid. Invariants and shared memory still balance.
+- **Sanitizers:** a ThreadSanitizer of-core and AddressSanitizer of-pay and of-report
+  ran the payment suite, the API suite and the 1,000-buyer rush. They reported no data
+  race, memory error or leak, including at SIGTERM shutdown.
+
+## 11. Testing
 
 | Layer | What runs | Result |
 |---|---|---|
-| Unit | `make test`: 8 programs covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), and **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm) | Passes in debug, asan, ubsan, tsan and release |
+| Unit | `make test`: 10 programs covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm), **order state machine** (all 64 edges, actors, final states), and **payment messages** (every-byte tampering, forgery, wrong key, replay window and nonce ring) | Passes in debug, asan, ubsan, tsan and release |
 | Integration | `tests/integration/api_test.sh`: 56 checks through Apache → of-api → of-core | 56/56 |
+| Payments and orders | `tests/integration/payment_test.sh` with `conf/test.conf` (4 s TTL): 56 checks | 56/56 |
 | Concurrency | `of-bench oversell` / `scripts/oversell-experiment.sh` | Gate 2 table above |
 | Lifecycle | Restart of-core under a running of-api; SIGTERM drain; core down gives 503 | of-api reconnects by itself; clean drain; shared memory and socket removed |

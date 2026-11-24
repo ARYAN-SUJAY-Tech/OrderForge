@@ -7,6 +7,7 @@
     document.querySelector('main').replaceChildren(el('p', { class: 'empty' }, 'Admin access required.'));
     return;
   }
+  document.querySelector('main').prepend(OF.adminNav('products'));
 
   const form = document.getElementById('editor');
   const errBox = document.getElementById('editor-error');

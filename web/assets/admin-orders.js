@@ -3,14 +3,33 @@
   const { el, api, money, fmtDate, statusBadge, toast } = OF;
   await OF.init('admin');
   if (!OF.requireLogin()) return;
+  const main = document.querySelector('main');
   if (!OF.isAdmin()) {
-    document.querySelector('main').replaceChildren(el('p', { class: 'empty' }, 'Admin access required.'));
+    main.replaceChildren(el('p', { class: 'empty' }, 'Admin access required.'));
     return;
   }
+  main.prepend(OF.adminNav('orders'));
 
   const PER_PAGE = 25;
   const statusSel = document.getElementById('status');
   let page = 1;
+
+  async function move(o, to, label) {
+    if ((to === 'refunded' || to === 'cancelled') && !confirm(`${label} order #${o.id}?`)) return;
+    try {
+      await api('POST', `/admin/orders/${o.id}/status`, { status: to });
+      toast(`Order #${o.id}: ${to}`, 'ok');
+    } catch (e) { toast(e.message, 'error'); }
+    load();
+  }
+
+  function actions(o) {
+    return el('div', { class: 'actions' }, OF.adminNext(o.status).map(([to, label]) => {
+      const b = el('button', { class: to === 'refunded' || to === 'cancelled' ? 'btn btn-danger btn-sm' : 'btn btn-sm' }, label);
+      b.addEventListener('click', () => move(o, to, label));
+      return b;
+    }));
+  }
 
   async function load() {
     const q = new URLSearchParams({ page, per_page: PER_PAGE });
@@ -25,10 +44,11 @@
       el('td', {}, fmtDate(o.created_at)),
       el('td', {}, statusBadge(o.status)),
       el('td', { class: 'num' }, o.units),
-      el('td', { class: 'num' }, money(o.total_paise))));
+      el('td', { class: 'num' }, money(o.total_paise)),
+      el('td', {}, actions(o))));
     document.getElementById('rows').replaceChildren(...rows);
     if (!rows.length) {
-      document.getElementById('rows').replaceChildren(el('tr', {}, el('td', { colspan: 6, class: 'empty' }, 'No orders.')));
+      document.getElementById('rows').replaceChildren(el('tr', {}, el('td', { colspan: 7, class: 'empty' }, 'No orders.')));
     }
 
     const pages = Math.max(1, Math.ceil(data.total / PER_PAGE));

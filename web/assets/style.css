@@ -125,3 +125,45 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 #toast.show { transform: translate(-50%, 0); }
 #toast.error { background: var(--bad); }
 #toast.ok { background: var(--ok); }
+
+/* ---- phase 3: admin navigation, payments, reports */
+.subnav { display: flex; gap: .25rem; margin: -.5rem 0 1.25rem; border-bottom: 1px solid var(--line); }
+.subnav a { padding: .5rem .9rem; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.subnav a:hover { color: var(--text); text-decoration: none; }
+.subnav a.active { color: var(--text); border-bottom-color: var(--accent); }
+.title-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.title-row h1 { margin: 0; }
+.inline { display: inline-flex; align-items: center; gap: .5rem; font-weight: 500; }
+.right { text-align: right; }
+.small { font-size: .8rem; font-weight: 400; }
+.spacer { flex: 1; }
+.payment { margin: 1rem 0; border-left: 4px solid var(--line); }
+.payment-succeeded { border-left-color: var(--ok); }
+.payment-pending { border-left-color: var(--accent); }
+.payment-declined, .payment-timed_out, .payment-cancelled, .payment-refunded { border-left-color: var(--bad); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.kpi-value { font-size: 1.6rem; font-weight: 700; margin-top: .25rem; font-variant-numeric: tabular-nums; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1rem; }
+@media (max-width: 860px) { .two-col { grid-template-columns: 1fr; } }
+.chart-title { margin-top: 0; }
+.chart { position: relative; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .axis { stroke: #c6ccd5; stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-family: inherit; }
+.chart .bar { fill: var(--accent); }
+.chart .hit { fill: transparent; cursor: default; }
+.chart .hit.on { fill: rgba(36, 86, 214, .06); }
+.chart-tip { position: absolute; top: 0; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: .45rem .65rem; font-size: .85rem; pointer-events: none; white-space: nowrap; }
+details { margin-top: .75rem; }
+details summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+.chips { display: flex; flex-wrap: wrap; gap: .5rem; }
+.chip { display: inline-flex; align-items: center; gap: .4rem; padding: .25rem .5rem .25rem .25rem; border: 1px solid var(--line); border-radius: 999px; }
+.health { display: grid; grid-template-columns: 1fr auto; gap: .35rem 1rem; margin: 0; }
+.health dt { color: var(--muted); }
+.health dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.card > h2:first-child { margin-top: 0; }
+.stock-ok, .stock-low, .stock-out { text-transform: none; }
+.status-pending { background: var(--accent-soft); color: var(--accent); }
+.status-succeeded { background: var(--ok-soft); color: var(--ok); }
+.status-declined, .status-timed_out { background: var(--bad-soft); color: var(--bad); }

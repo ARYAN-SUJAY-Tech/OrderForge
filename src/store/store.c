@@ -44,6 +44,7 @@ static const route_t routes[] = {
     {OF_POST,   "/api/checkout",                    USER,   h_checkout},
     {OF_GET,    "/api/orders",                      USER,   h_orders_mine},
     {OF_GET,    "/api/orders/:id",                  USER,   h_order_get},
+    {OF_POST,   "/api/orders/:id/cancel",           USER,   h_order_cancel},
 
     {OF_GET,    "/api/admin/products",              ADMIN,  h_admin_products},
     {OF_POST,   "/api/admin/products",              ADMIN,  h_admin_product_create},
@@ -51,7 +52,10 @@ static const route_t routes[] = {
     {OF_DELETE, "/api/admin/products/:id",          ADMIN,  h_admin_product_delete},
     {OF_POST,   "/api/admin/products/:id/stock",    ADMIN,  h_admin_stock},
     {OF_GET,    "/api/admin/orders",                ADMIN,  h_admin_orders},
+    {OF_POST,   "/api/admin/orders/:id/status",     ADMIN,  h_admin_order_status},
     {OF_GET,    "/api/admin/system",                ADMIN,  h_admin_system},
+    {OF_GET,    "/api/admin/reports",               ADMIN,  h_admin_reports},
+    {OF_GET,    "/api/admin/reports/export",        ADMIN,  h_admin_report_export},
 };
 
 /* ------------------------------------------------------------------ init */
@@ -104,11 +108,14 @@ int store_init(store_t *s, const of_config_t *cfg, stock_table_t *stock, int mod
     }
     s->stock_mode = (stock_mode_t)mode;
 
-    int ok1, ok2;
+    int ok1, ok2, ok3;
     s->naive_delay_us = of_config_get_long(cfg, "store.naive_delay_us", 0, 0, 1000000, &ok1);
     s->session_ttl_s = of_config_get_long(cfg, "auth.session_ttl", 86400, 60, 2592000, &ok2);
-    if (!ok1 || !ok2) {
-        snprintf(err, errlen, "store.naive_delay_us or auth.session_ttl out of range");
+    s->reservation_ttl_s =
+        of_config_get_long(cfg, "store.reservation_ttl_s", 120, 2, 86400, &ok3);
+    if (!ok1 || !ok2 || !ok3) {
+        snprintf(err, errlen,
+                 "store.naive_delay_us, auth.session_ttl or store.reservation_ttl_s out of range");
         return -1;
     }
     s->cookie_secure = strcmp(of_config_get(cfg, "auth.cookie_secure", "0"), "1") == 0;

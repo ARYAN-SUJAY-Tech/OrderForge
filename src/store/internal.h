@@ -5,6 +5,7 @@
 #define OF_STORE_INTERNAL_H
 
 #include "common/json.h"
+#include "common/order_state.h"
 #include "store/store.h"
 
 #include <stdbool.h>
@@ -69,6 +70,50 @@ int render_order(ctx_t *c, int64_t order_id, int64_t owner_only);
 
 /* Find or create the current user's cart. Returns its id, or -1 on db error. */
 int64_t cart_id(ctx_t *c);
+
+/* ---- order flow (flow.c) ------------------------------------------------------------
+ * Lock order inside every transaction that changes an order, to rule out deadlocks:
+ *     orders row  ->  payments row  ->  reservations  ->  inventory rows (ascending id)
+ */
+#define ORDER_MAX_LINES 50
+
+typedef struct {
+    size_t       n;
+    stock_line_t lines[ORDER_MAX_LINES];
+} stock_back_t;
+
+/* In an open transaction: lock the order row (SELECT ... FOR UPDATE).
+ * 1 found, 0 no such order, -1 db error. */
+int order_lock(db_t *db, int64_t order_id, order_state_t *state, int64_t *user_id);
+
+/*
+ * In an open transaction, with the order locked and known to be in `from`:
+ * guarded UPDATE, timeline event, and the side effects of entering `to`:
+ *   paid                 reservations active -> committed
+ *   cancelled, refunded  reservations -> released, stock_on_hand += qty, ledger row;
+ *                        the units are collected in *back for shared memory
+ * 1 done, 0 lost a race (status no longer `from`), -1 db error.
+ */
+int order_move(store_t *s, db_t *db, int64_t order_id, order_state_t from, order_state_t to,
+               const char *actor, const char *note, stock_back_t *back);
+
+/* After COMMIT: make returned units sellable again in shared memory (lockfree mode). */
+void order_stock_back(store_t *s, const stock_back_t *back);
+
+/*
+ * A complete, self-contained change for API callers (own transaction). `to` may be
+ * ORDER_STATE_INVALID for "cancel", which picks cancelled (unpaid) or refunded (paid).
+ * owner_only > 0 restricts the change to that user's order.
+ * Returns 1 done, 0 not allowed (*cur holds the current state), -2 not found, -1 error.
+ */
+int order_change(store_t *s, int64_t order_id, order_state_t to, order_actor_t actor,
+                 int64_t owner_only, const char *actor_name, const char *note,
+                 order_state_t *cur, order_state_t *result);
+
+void h_order_cancel(ctx_t *c);
+void h_admin_order_status(ctx_t *c);
+void h_admin_reports(ctx_t *c);
+void h_admin_report_export(ctx_t *c);
 
 /* ---- session lookup (auth.c), called by the router before protected handlers */
 int auth_load_session(ctx_t *c);

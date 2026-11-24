@@ -66,13 +66,14 @@ int proto_encode_request(buf_t *out, uint64_t request_id, const of_req_t *req)
     buf_append(out, &method, 1);
 
     const char *path = nz(req->path), *query = nz(req->query), *sess = nz(req->session_token),
-               *csrf = nz(req->csrf_token), *ip = nz(req->ip);
+               *csrf = nz(req->csrf_token), *ip = nz(req->ip), *idem = nz(req->idem_key);
     if (put_field(out, path, strlen(path), OF_MAX_PATH) ||
         put_field(out, query, strlen(query), OF_MAX_QUERY) ||
         put_field(out, nz(req->body), req->body ? req->body_len : 0, OF_MAX_BODY) ||
         put_field(out, sess, strlen(sess), OF_MAX_TOKEN) ||
         put_field(out, csrf, strlen(csrf), OF_MAX_TOKEN) ||
-        put_field(out, ip, strlen(ip), OF_MAX_IP) || end_frame(out, at)) {
+        put_field(out, ip, strlen(ip), OF_MAX_IP) ||
+        put_field(out, idem, strlen(idem), OF_MAX_IDEM) || end_frame(out, at)) {
         out->len = start; /* drop the partial frame */
         return -1;
     }
@@ -155,7 +156,8 @@ int proto_decode_request(const void *payload, size_t len, of_req_t *req, char *a
         get_field(&r, OF_MAX_BODY, &req->body, &req->body_len) ||
         get_field(&r, OF_MAX_TOKEN, &req->session_token, NULL) ||
         get_field(&r, OF_MAX_TOKEN, &req->csrf_token, NULL) ||
-        get_field(&r, OF_MAX_IP, &req->ip, NULL))
+        get_field(&r, OF_MAX_IP, &req->ip, NULL) ||
+        get_field(&r, OF_MAX_IDEM, &req->idem_key, NULL))
         return -1;
     return r.left == 0 ? 0 : -1;
 }

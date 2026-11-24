@@ -13,6 +13,17 @@
  *
  *   of-api ──frame──▶ reactor ──queue──▶ worker ──completion list + eventfd──▶ reactor ──▶ of-api
  *
+ *   pay sender             pops payment requests that workers put in a bounded outbox,
+ *                          signs them (HMAC-SHA256) and mq_send()s them to of-pay. The
+ *                          kernel limits an unprivileged queue to 10 messages, so the
+ *                          outbox absorbs bursts and the sender blocks (with a timeout)
+ *                          while the queue is full.
+ *   background             its own epoll loop over the reply queue (a POSIX message queue
+ *                          is a pollable descriptor on Linux), a timerfd for the
+ *                          reservation-expiry reaper, and an eventfd used to stop it.
+ *                          Verifies each reply's MAC and nonce, then applies it. Owns one
+ *                          MySQL connection, separate from the workers'.
+ *
  * Backpressure
  *   The queue is bounded (core.queue_size). When it is full the reactor answers 503
  *   "busy" at once instead of buffering without limit; busy_rejects counts it.
@@ -36,6 +47,7 @@
  */
 #include "common/config.h"
 #include "common/log.h"
+#include "common/paymsg.h"
 #include "common/proto.h"
 #include "common/queue.h"
 #include "common/stock.h"
@@ -43,7 +55,9 @@
 #include "store/store.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <libgen.h>
+#include <mqueue.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -54,6 +68,7 @@
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -99,6 +114,14 @@ static char          sock_path[108];
 static uid_t         allow_uid;
 static int64_t       job_timeout_us, slow_us;
 static int           nworkers;
+
+/* Payments. */
+static queue_t       pay_outbox;
+static mqd_t         mq_req = (mqd_t)-1, mq_rep = (mqd_t)-1;
+static uint8_t       pay_key[PAY_KEY_LEN];
+static int           bg_stop_fd = -1;
+static int64_t       reaper_interval_ms;
+static _Atomic bool  pay_stopping;
 
 /* Completion list: workers append, the reactor drains. */
 static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -154,6 +177,193 @@ static void complete(job_t *j)
     } while (w < 0 && errno == EINTR);
 }
 
+/* ------------------------------------------------------------------ payments */
+
+/* Called by workers (through store_t.pay_submit) after a checkout commits. Never blocks:
+ * when the outbox is full the order simply waits and expires. */
+static int pay_submit(void *ctx, const void *req)
+{
+    (void)ctx;
+    pay_msg_t *copy = malloc(sizeof *copy);
+    if (!copy)
+        return -1;
+    memcpy(copy, req, sizeof *copy);
+    if (!queue_try_push(&pay_outbox, copy)) {
+        free(copy);
+        return -1;
+    }
+    return 0;
+}
+
+static void *pay_sender_main(void *arg)
+{
+    (void)arg;
+    pay_msg_t *m;
+    while ((m = queue_pop(&pay_outbox)) != NULL) {
+        if (pay_sign(m, pay_key) != 0) {
+            free(m);
+            continue;
+        }
+        /* Blocks while the kernel queue is full; the timeout lets shutdown proceed even if
+         * of-pay is not running (the unsent orders will expire). */
+        for (;;) {
+            /* Normally wait up to 1 s for room; once shutting down, try each message just
+             * once, so a full queue (of-pay not running) cannot stall the exit. */
+            struct timespec deadline;
+            clock_gettime(CLOCK_REALTIME, &deadline);
+            if (!atomic_load(&pay_stopping))
+                deadline.tv_sec += 1;
+            if (mq_timedsend(mq_req, (const char *)m, sizeof *m, 0, &deadline) == 0)
+                break;
+            if (errno == EINTR)
+                continue;
+            if (errno == ETIMEDOUT && !atomic_load(&pay_stopping))
+                continue;
+            LOG_WARN("payment_not_sent", "order %llu: %s", (unsigned long long)m->order_id,
+                     errno == ETIMEDOUT ? "gateway queue full at shutdown" : strerror(errno));
+            break;
+        }
+        free(m);
+    }
+    return NULL;
+}
+
+static void handle_reply(store_t *store, pay_replay_t *replay, const pay_msg_t *m)
+{
+    if (pay_verify(m, PAY_REPLY, pay_key) != 0) {
+        atomic_fetch_add(&METRIC(payments_rejected), 1);
+        LOG_WARN("payment_rejected", "reply with a bad MAC or format dropped");
+        return;
+    }
+    if (pay_replay_check(replay, m, pay_now_ms(), 300000) != 0) {
+        atomic_fetch_add(&METRIC(payments_rejected), 1);
+        LOG_WARN("payment_rejected", "replayed or stale reply for %s dropped", m->idem_key);
+        return;
+    }
+    if (store_payment_reply(store, m) < 0)
+        LOG_ERROR("payment_apply", "could not apply reply for %s: %s", m->idem_key,
+                  db_error(store->db));
+}
+
+static void *background_main(void *arg)
+{
+    (void)arg;
+    store_t store;
+    char err[256];
+    static pay_replay_t replay;
+    if (store_init(&store, &cfg, &stock, stock_mode, err, sizeof err) != 0) {
+        LOG_ERROR("background", "%s", err);
+        return NULL;
+    }
+
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    struct itimerspec its = {
+        .it_interval = {reaper_interval_ms / 1000, (reaper_interval_ms % 1000) * 1000000},
+        .it_value = {reaper_interval_ms / 1000, (reaper_interval_ms % 1000) * 1000000},
+    };
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    if (tfd < 0 || ep < 0 || timerfd_settime(tfd, 0, &its, NULL) != 0) {
+        LOG_ERROR("background", "timerfd/epoll: %s", strerror(errno));
+        return NULL;
+    }
+    struct epoll_event ev = {.events = EPOLLIN};
+    ev.data.u32 = 1;
+    epoll_ctl(ep, EPOLL_CTL_ADD, (int)mq_rep, &ev);
+    ev.data.u32 = 2;
+    epoll_ctl(ep, EPOLL_CTL_ADD, tfd, &ev);
+    ev.data.u32 = 3;
+    epoll_ctl(ep, EPOLL_CTL_ADD, bg_stop_fd, &ev);
+    LOG_INFO("background", "payment replies and reaper (every %lld ms) running",
+             (long long)reaper_interval_ms);
+
+    int64_t next_reconnect = 0;
+    for (bool running = true; running;) {
+        struct epoll_event evs[4];
+        int n = epoll_wait(ep, evs, 4, -1);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (db_broken(store.db) && of_now_us() >= next_reconnect) {
+            next_reconnect = of_now_us() + 1000000;
+            if (store_reconnect(&store, err, sizeof err) != 0)
+                LOG_WARN("db_reconnect", "background: %s", err);
+        }
+        for (int i = 0; i < n; i++) {
+            if (evs[i].data.u32 == 1) {
+                pay_msg_t m;
+                ssize_t got;
+                while ((got = mq_receive(mq_rep, (char *)&m, sizeof m, NULL)) >= 0) {
+                    if ((size_t)got == sizeof m)
+                        handle_reply(&store, &replay, &m);
+                    else
+                        atomic_fetch_add(&METRIC(payments_rejected), 1);
+                }
+            } else if (evs[i].data.u32 == 2) {
+                uint64_t ticks;
+                if (read(tfd, &ticks, sizeof ticks) != sizeof ticks)
+                    continue;
+                int expired;
+                while ((expired = store_expire_reservations(&store, 100)) == 100)
+                    ;
+                if (expired < 0)
+                    LOG_WARN("reaper", "expiry pass failed: %s", db_error(store.db));
+            } else {
+                running = false;
+            }
+        }
+    }
+    close(tfd);
+    close(ep);
+    store_close(&store);
+    return NULL;
+}
+
+static int setup_payments(void)
+{
+    if (pay_key_from_hex(of_config_get(&cfg, "pay.hmac_key", ""), pay_key) != 0) {
+        LOG_ERROR("payments", "pay.hmac_key must be 64 hex characters");
+        fprintf(stderr, "of-core: pay.hmac_key missing or invalid in the config. Add one with:\n"
+                        "  echo \"pay.hmac_key = $(openssl rand -hex 32)\" >> conf/orderforge.conf\n");
+        return -1;
+    }
+    int ok1, ok2, ok3;
+    long maxmsg = of_config_get_long(&cfg, "pay.mq_maxmsg", 10, 1, 1000, &ok1);
+    long outbox = of_config_get_long(&cfg, "pay.outbox_size", 8192, 1, 1 << 20, &ok2);
+    reaper_interval_ms = of_config_get_long(&cfg, "core.reaper_interval_ms", 1000, 50, 600000, &ok3);
+    if (!ok1 || !ok2 || !ok3) {
+        LOG_ERROR("payments", "pay.mq_maxmsg, pay.outbox_size or core.reaper_interval_ms out of range");
+        return -1;
+    }
+    const char *req_name = of_config_get(&cfg, "pay.request_queue", "/orderforge-pay-req");
+    const char *rep_name = of_config_get(&cfg, "pay.reply_queue", "/orderforge-pay-rep");
+
+    /* Created by whichever of of-core and of-pay starts first; both use these attributes.
+     * The queues are never unlinked on shutdown, so messages survive a restart. */
+    struct mq_attr attr = {.mq_maxmsg = maxmsg, .mq_msgsize = sizeof(pay_msg_t)};
+    mq_req = mq_open(req_name, O_CREAT | O_WRONLY | O_CLOEXEC, 0600, &attr);
+    mq_rep = mq_open(rep_name, O_CREAT | O_RDONLY | O_NONBLOCK | O_CLOEXEC, 0600, &attr);
+    if (mq_req == (mqd_t)-1 || mq_rep == (mqd_t)-1) {
+        LOG_ERROR("payments", "mq_open %s / %s: %s (msg_max is /proc/sys/fs/mqueue/msg_max)",
+                  req_name, rep_name, strerror(errno));
+        fprintf(stderr, "of-core: cannot open payment queues: %s\n", strerror(errno));
+        return -1;
+    }
+    struct mq_attr got;
+    if (mq_getattr(mq_rep, &got) != 0 || got.mq_msgsize != (long)sizeof(pay_msg_t)) {
+        LOG_ERROR("payments", "queue %s exists with message size %ld, expected %zu; remove it: "
+                              "rm /dev/mqueue%s",
+                  rep_name, (long)got.mq_msgsize, sizeof(pay_msg_t), rep_name);
+        return -1;
+    }
+    if (queue_init(&pay_outbox, (size_t)outbox) != 0)
+        return -1;
+    bg_stop_fd = eventfd(0, EFD_CLOEXEC);
+    LOG_INFO("payments", "queues %s -> of-pay -> %s (max %ld messages), outbox %ld", req_name,
+             rep_name, maxmsg, outbox);
+    return bg_stop_fd < 0 ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ workers */
+
 static void *worker_main(void *arg)
 {
     long id = (long)arg;
@@ -161,6 +371,7 @@ static void *worker_main(void *arg)
     char err[256];
 
     int rc = store_init(&store, &cfg, &stock, stock_mode, err, sizeof err);
+    store.pay_submit = pay_submit;
     pthread_mutex_lock(&init_lock);
     if (rc == 0)
         workers_ready++;
@@ -612,6 +823,9 @@ int main(int argc, char **argv)
     ev.data.u64 = TAG_SIGNALFD;
     epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &ev);
 
+    if (setup_payments() != 0)
+        return 1;
+
     pthread_t *threads = calloc((size_t)nworkers, sizeof *threads);
     for (long i = 0; i < nworkers; i++)
         if (pthread_create(&threads[i], NULL, worker_main, (void *)i) != 0) {
@@ -624,6 +838,13 @@ int main(int argc, char **argv)
     pthread_mutex_unlock(&init_lock);
     if (workers_failed) {
         fprintf(stderr, "of-core: %d workers could not start (see the log)\n", workers_failed);
+        return 1;
+    }
+
+    pthread_t sender_thread, bg_thread;
+    if (pthread_create(&sender_thread, NULL, pay_sender_main, NULL) != 0 ||
+        pthread_create(&bg_thread, NULL, background_main, NULL) != 0) {
+        LOG_ERROR("init", "cannot start the payment threads");
         return 1;
     }
 
@@ -683,7 +904,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Workers finish whatever is still queued, then see NULL and exit. */
+    /* Workers finish whatever is still queued, then see NULL and exit. Then the payment
+     * sender flushes what it can (1 s per message at most), and the background thread
+     * stops when its eventfd fires. */
     queue_close(&jobs);
     for (int i = 0; i < nworkers; i++)
         pthread_join(threads[i], NULL);
@@ -692,6 +915,16 @@ int main(int argc, char **argv)
         conn_close(i);
     free(threads);
     queue_destroy(&jobs);
+    atomic_store(&pay_stopping, true);
+    queue_close(&pay_outbox);
+    pthread_join(sender_thread, NULL);
+    uint64_t one = 1;
+    if (write(bg_stop_fd, &one, sizeof one) != sizeof one)
+        LOG_WARN("shutdown", "could not signal the background thread");
+    pthread_join(bg_thread, NULL);
+    mq_close(mq_req);
+    mq_close(mq_rep);
+    queue_destroy(&pay_outbox);
     stock_close(&stock, true);
     LOG_INFO("shutdown", "of-core stopped");
     return 0;

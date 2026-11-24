@@ -17,7 +17,7 @@ static void test_request_roundtrip(void)
     buf_t b;
     buf_init(&b);
     of_req_t in = {OF_POST, "/api/cart/items", "a=1&b=2", "{\"qty\":2}", 9,
-                   "abc", "def", "127.0.0.1"};
+                   "abc", "def", "127.0.0.1", "retry-key-1"};
     CHECK(proto_encode_request(&b, 77, &in) == 0);
     CHECK(proto_check_header(hdr(&b), OF_MSG_REQUEST) == 0);
     CHECK(hdr(&b)->request_id == 77);
@@ -35,14 +35,16 @@ static void test_request_roundtrip(void)
     CHECK_STR(out.session_token, "abc");
     CHECK_STR(out.csrf_token, "def");
     CHECK_STR(out.ip, "127.0.0.1");
+    CHECK_STR(out.idem_key, "retry-key-1");
 
     /* NULL fields encode as empty strings. */
     buf_reset(&b);
-    of_req_t empty = {OF_GET, "/api/me", NULL, NULL, 0, NULL, NULL, NULL};
+    of_req_t empty = {OF_GET, "/api/me", NULL, NULL, 0, NULL, NULL, NULL, NULL};
     CHECK(proto_encode_request(&b, 1, &empty) == 0);
     CHECK(proto_decode_request(b.data + OF_PROTO_HDR_SIZE, hdr(&b)->length, &out, arena,
                                sizeof arena) == 0);
-    CHECK_STR(out.query, "") ;
+    CHECK_STR(out.query, "");
+    CHECK_STR(out.idem_key, "");
     CHECK(out.body_len == 0 && out.body[0] == '\0');
     buf_free(&b);
 }
@@ -71,7 +73,7 @@ static void test_caps(void)
     char *big = malloc(OF_MAX_PATH + 2);
     memset(big, 'a', OF_MAX_PATH + 1);
     big[OF_MAX_PATH + 1] = '\0';
-    of_req_t in = {OF_GET, big, "", "", 0, "", "", ""};
+    of_req_t in = {OF_GET, big, "", "", 0, "", "", "", ""};
     CHECK(proto_encode_request(&b, 1, &in) == -1);
     CHECK(b.len == 0); /* partial frame dropped */
     big[OF_MAX_PATH] = '\0';
@@ -86,7 +88,7 @@ static void test_caps(void)
     h.magic ^= 1;
     CHECK(proto_check_header(&h, OF_MSG_REQUEST) == -1);
     h.magic = OF_PROTO_MAGIC;
-    h.version = 2;
+    h.version = OF_PROTO_VERSION + 1;
     CHECK(proto_check_header(&h, OF_MSG_REQUEST) == -1);
     buf_free(&b);
 }
@@ -95,7 +97,7 @@ static void test_malformed(void)
 {
     buf_t b;
     buf_init(&b);
-    of_req_t in = {OF_DELETE, "/api/x", "q", "body", 4, "s", "c", "ip"};
+    of_req_t in = {OF_DELETE, "/api/x", "q", "body", 4, "s", "c", "ip", "k"};
     CHECK(proto_encode_request(&b, 1, &in) == 0);
     const char *p = b.data + OF_PROTO_HDR_SIZE;
     size_t len = hdr(&b)->length;

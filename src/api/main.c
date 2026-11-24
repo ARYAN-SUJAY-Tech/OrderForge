@@ -298,6 +298,7 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
     const char *clen_s = FCGX_GetParam("CONTENT_LENGTH", rq->envp);
     const char *csrf = FCGX_GetParam("HTTP_X_CSRF_TOKEN", rq->envp);
     const char *ip = FCGX_GetParam("REMOTE_ADDR", rq->envp);
+    const char *idem = FCGX_GetParam("HTTP_IDEMPOTENCY_KEY", rq->envp);
 
     of_req_t req = {
         .method = parse_method(method_s),
@@ -308,6 +309,7 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
         .session_token = session,
         .csrf_token = csrf ? csrf : "",
         .ip = ip ? ip : "",
+        .idem_key = idem ? idem : "",
     };
 
     resp->status = 0;
@@ -322,8 +324,9 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
         memcpy(path, uri, plen);
         path[plen] = '\0';
     }
-    if (resp->status == 0 && (strlen(req.query) > OF_MAX_QUERY || strlen(req.csrf_token) >
-                                                                      OF_MAX_TOKEN))
+    if (resp->status == 0 &&
+        (strlen(req.query) > OF_MAX_QUERY || strlen(req.csrf_token) > OF_MAX_TOKEN ||
+         strlen(req.idem_key) > OF_MAX_IDEM))
         api_error(resp, 400, "bad_request", "query string or header too long");
 
     int64_t clen = 0;

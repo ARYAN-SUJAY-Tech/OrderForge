@@ -5,13 +5,14 @@
  *
  *   offset size  field
  *   0      4     magic       "OFP1"
- *   4      2     version     1
+ *   4      2     version     2 (bumped when the payload layout changes)
  *   6      2     type        1 = request, 2 = response
  *   8      8     request_id  chosen by the sender of the request, echoed in the response
  *   16     4     length      payload bytes (hard cap per type, checked before reading)
  *   20     4     reserved    0
  *
- * Request payload:  u8 method, then six fields: path, query, body, session, csrf, ip
+ * Request payload:  u8 method, then seven fields: path, query, body, session, csrf, ip,
+ *                   idempotency key
  * Response payload: u16 status, then two fields: set_cookie, body
  * A field is u32 length + that many bytes (no terminator). Each field has its own cap.
  *
@@ -28,7 +29,7 @@
 #include <stdint.h>
 
 #define OF_PROTO_MAGIC   0x3150464Fu /* "OFP1" read as little-endian */
-#define OF_PROTO_VERSION 1
+#define OF_PROTO_VERSION 2
 #define OF_MSG_REQUEST   1
 #define OF_MSG_RESPONSE  2
 
@@ -40,11 +41,12 @@
 #define OF_MAX_BODY     16384
 #define OF_MAX_TOKEN    128
 #define OF_MAX_IP       64
+#define OF_MAX_IDEM     64
 #define OF_MAX_COOKIE   256
 #define OF_MAX_RESP_BODY (4u * 1024 * 1024)
 
-#define OF_MAX_REQ_PAYLOAD  (1 + 6 * 4 + OF_MAX_PATH + OF_MAX_QUERY + OF_MAX_BODY + \
-                             2 * OF_MAX_TOKEN + OF_MAX_IP)
+#define OF_MAX_REQ_PAYLOAD  (1 + 7 * 4 + OF_MAX_PATH + OF_MAX_QUERY + OF_MAX_BODY + \
+                             2 * OF_MAX_TOKEN + OF_MAX_IP + OF_MAX_IDEM)
 #define OF_MAX_RESP_PAYLOAD (2 + 2 * 4 + OF_MAX_COOKIE + OF_MAX_RESP_BODY)
 
 typedef enum { OF_GET, OF_POST, OF_PUT, OF_DELETE, OF_METHOD_OTHER } of_method_t;
@@ -59,6 +61,7 @@ typedef struct {
     const char *session_token; /* value of the of_session cookie, "" if none */
     const char *csrf_token;    /* X-CSRF-Token header, "" if none */
     const char *ip;            /* client address as seen by Apache */
+    const char *idem_key;      /* Idempotency-Key header, "" if none */
 } of_req_t;
 
 typedef struct {

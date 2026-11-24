@@ -30,6 +30,8 @@ core.shm_name = /orderforge
 core.stock_capacity = 4096
 # Extra uid allowed to connect to the core socket (default: only our own uid).
 # core.allow_uid = 33
+# How often the reservation-expiry reaper runs (a timerfd in of-core).
+core.reaper_interval_ms = 1000
 
 # ---- of-api (pre-forked FastCGI workers behind Apache)
 api.listen  = 127.0.0.1:9000
@@ -46,6 +48,32 @@ store.stock_mode = lockfree-shm
 # Extra delay inside the naive read-modify-write, in microseconds. Widens the race
 # window for demonstrations; keep 0 for normal use.
 store.naive_delay_us = 0
+# An unpaid order holds its stock this long; then the reaper cancels it.
+store.reservation_ttl_s = 120
+
+# ---- payments: of-core <-> of-pay over two POSIX message queues (/dev/mqueue)
+# Shared secret for the HMAC-SHA256 on every payment message: 64 hex characters.
+# scripts/setup-db.sh generates it; or: echo "pay.hmac_key = $(openssl rand -hex 32)"
+pay.hmac_key = CHANGE_ME
+pay.request_queue = /orderforge-pay-req
+pay.reply_queue   = /orderforge-pay-rep
+# Messages per queue. Unprivileged processes are limited to /proc/sys/fs/mqueue/msg_max
+# (10 by default); of-core buffers bursts in an in-memory outbox of pay.outbox_size.
+pay.mq_maxmsg   = 10
+pay.outbox_size = 8192
+# Mock gateway behaviour: normal reply latency, the tok_slow delay (keep it longer than
+# store.reservation_ttl_s to demonstrate late-payment refunds), and the tok_random mix.
+pay.latency_min_ms = 20
+pay.latency_max_ms = 150
+pay.slow_ms        = 180000
+pay.decline_pct    = 10
+pay.timeout_pct    = 5
+pay.duplicate_pct  = 5
+
+# ---- of-report
+report.dir        = run/reports
+report.interval_s = 10
+report.days       = 30
 
 # ---- authentication
 auth.session_ttl   = 86400

@@ -4,7 +4,8 @@
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
-DROP TABLE IF EXISTS audit_log, stock_movements, order_events, order_items, orders,
+DROP TABLE IF EXISTS report_meta, product_sales_daily, daily_sales, payments, reservations,
+                     audit_log, stock_movements, order_events, order_items, orders,
                      cart_items, carts, inventory, products, categories, sessions, users;
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -90,7 +91,7 @@ CREATE TABLE orders (
     user_id         BIGINT UNSIGNED NOT NULL,
     status          VARCHAR(20) NOT NULL,
     total_paise     BIGINT NOT NULL,
-    idempotency_key VARCHAR(64) NULL,
+    idempotency_key VARCHAR(100) NULL, -- "u<user id>:<client key>"
     created_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE KEY uq_orders_idem (idempotency_key),
@@ -150,4 +151,68 @@ CREATE TABLE audit_log (
     ip       VARCHAR(45) NOT NULL DEFAULT '',
     at       DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     KEY ix_audit_at (at)
+) ENGINE = InnoDB;
+
+-- Stock held for an order. Checkout takes the units off stock_on_hand immediately and
+-- records them here with a deadline:
+--   active     waiting for payment; the expiry reaper releases it after expires_at
+--   committed  the order was paid; the units are sold
+--   released   cancelled, declined, timed out or refunded; the units went back
+CREATE TABLE reservations (
+    order_id   BIGINT UNSIGNED NOT NULL,
+    product_id BIGINT UNSIGNED NOT NULL,
+    qty        INT NOT NULL,
+    state      ENUM('active', 'committed', 'released') NOT NULL DEFAULT 'active',
+    expires_at DATETIME(3) NOT NULL,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (order_id, product_id),
+    KEY ix_reservations_expiry (state, expires_at),
+    CONSTRAINT ck_reservations_qty CHECK (qty > 0),
+    CONSTRAINT fk_reservations_order FOREIGN KEY (order_id) REFERENCES orders (id),
+    CONSTRAINT fk_reservations_product FOREIGN KEY (product_id) REFERENCES products (id)
+) ENGINE = InnoDB;
+
+-- One row per payment attempt. The unique idempotency key makes a duplicated or
+-- replayed gateway reply harmless: only one reply can move a row out of 'pending'.
+CREATE TABLE payments (
+    id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_id      BIGINT UNSIGNED NOT NULL,
+    idem_key      VARCHAR(48) NOT NULL,
+    method        VARCHAR(24) NOT NULL,
+    status        ENUM('pending', 'succeeded', 'declined', 'timed_out', 'cancelled',
+                       'refunded') NOT NULL DEFAULT 'pending',
+    amount_paise  BIGINT NOT NULL,
+    provider_ref  VARCHAR(32) NOT NULL DEFAULT '',
+    note          VARCHAR(255) NOT NULL DEFAULT '',
+    created_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uq_payments_idem (idem_key),
+    KEY ix_payments_order (order_id),
+    CONSTRAINT ck_payments_amount CHECK (amount_paise >= 0),
+    CONSTRAINT fk_payments_order FOREIGN KEY (order_id) REFERENCES orders (id)
+) ENGINE = InnoDB;
+
+-- Written by of-report, read by the admin dashboards.
+CREATE TABLE daily_sales (
+    day           DATE NOT NULL PRIMARY KEY,
+    orders        INT NOT NULL,
+    units         INT NOT NULL,
+    revenue_paise BIGINT NOT NULL
+) ENGINE = InnoDB;
+
+CREATE TABLE product_sales_daily (
+    day           DATE NOT NULL,
+    product_id    BIGINT UNSIGNED NOT NULL,
+    units         INT NOT NULL,
+    revenue_paise BIGINT NOT NULL,
+    PRIMARY KEY (day, product_id),
+    KEY ix_psd_product (product_id, day)
+) ENGINE = InnoDB;
+
+CREATE TABLE report_meta (
+    name         VARCHAR(32) NOT NULL PRIMARY KEY,
+    generated_at DATETIME(3) NOT NULL,
+    duration_ms  INT NOT NULL,
+    note         VARCHAR(255) NOT NULL DEFAULT ''
 ) ENGINE = InnoDB;

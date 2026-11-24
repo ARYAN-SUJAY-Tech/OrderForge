@@ -22,6 +22,17 @@ else
     echo "wrote $CONF"
 fi
 
+# The shared secret that signs payment messages between of-core and of-pay.
+if ! grep -q '^pay.hmac_key *= *[0-9a-f]\{64\}' "$CONF"; then
+    KEY=$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')
+    if grep -q '^pay.hmac_key' "$CONF"; then
+        sed -i "s|^pay.hmac_key *=.*|pay.hmac_key = $KEY|" "$CONF"
+    else
+        echo "pay.hmac_key = $KEY" >> "$CONF"
+    fi
+    echo "generated pay.hmac_key in $CONF"
+fi
+
 mysql <<SQL
 CREATE DATABASE IF NOT EXISTS \`$DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 CREATE USER IF NOT EXISTS '$DBUSER'@'localhost' IDENTIFIED BY '$PASS';

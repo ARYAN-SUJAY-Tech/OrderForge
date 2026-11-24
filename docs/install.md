@@ -20,8 +20,12 @@ sudo ./scripts/setup-db.sh
 ```
 
 This creates the `orderforge` database and MySQL user with a random password, and
-writes `conf/orderforge.conf` from `conf/orderforge.conf.example`. The file has mode
-0600 and is git-ignored, because it holds the database password.
+writes `conf/orderforge.conf` from `conf/orderforge.conf.example`. It also generates
+`pay.hmac_key`, the secret that signs payment messages. The file has mode 0600 and is
+git-ignored, because it holds both secrets.
+
+Re-running the script is safe: it keeps the existing password, and adds the HMAC key if
+it is missing.
 
 ## 3. Build
 
@@ -60,30 +64,44 @@ sudo ./scripts/install-site.sh
 This copies `web/` to `/var/www/orderforge` and enables the virtual host on port 8080,
 from `conf/apache-orderforge.conf`. Re-run it after changing files under `web/`.
 
-## 6. Start the engine and the API
+## 6. Start the daemons
 
 ```sh
-scripts/run.sh                    # of-core + of-api in the foreground; Ctrl-C stops both
+scripts/run.sh                    # all four daemons in the foreground; Ctrl-C stops them
 MODE=naive scripts/run.sh         # override the stock mode: naive | db-lock | lockfree-shm
 ```
 
-`run.sh` starts `of-core` first, waits for its socket, then starts `of-api`. If either
-daemon exits, it stops the other.
+`run.sh` starts `of-core` first and waits for its socket. Then it starts `of-pay` (the
+mock payment gateway), `of-report` (sales aggregation) and `of-api`. If any daemon
+exits, it stops the others.
 
-Open <http://localhost:8080/>. Logs are written as JSON lines to `run/log/of-core.log`
-and `run/log/of-api.log`.
+Open <http://localhost:8080/>. Each daemon writes JSON-line logs to `run/log/<name>.log`.
+Reports are written to `run/reports/`.
 
-You can also start the daemons by hand, in this order:
+You can also start the daemons by hand, `of-core` first:
 
 ```sh
-./build/debug/of-core -c conf/orderforge.conf [-m lockfree-shm]
-./build/debug/of-api  -c conf/orderforge.conf
+./build/debug/of-core   -c conf/orderforge.conf [-m lockfree-shm]
+./build/debug/of-pay    -c conf/orderforge.conf
+./build/debug/of-report -c conf/orderforge.conf      # --once: one report run, then exit
+./build/debug/of-api    -c conf/orderforge.conf
 ```
 
 | Action | Command |
 |---|---|
 | Stop | Ctrl-C, or `kill -TERM <pid>`. of-core drains in-flight requests first |
 | Reopen the log files | `kill -HUP <pid>` |
+| Regenerate reports now | `pkill -HUP of-report` |
+
+**Upgrading from phase 2:**
+
+1. **Reload the schema.** Phase 3 adds tables and widens `orders.idempotency_key`:
+   `./scripts/load-db.sh`. This resets the data.
+2. **Add the payment secret:**
+   `echo "pay.hmac_key = $(openssl rand -hex 32)" >> conf/orderforge.conf`, or re-run
+   `sudo ./scripts/setup-db.sh`.
+3. **Optionally,** copy the new `pay.*`, `report.*` and `store.reservation_ttl_s`
+   settings from `conf/orderforge.conf.example`. The defaults also work.
 
 **Config from phase 1:** if your `conf/orderforge.conf` was created in phase 1, check
 that it has `store.stock_mode = lockfree-shm`, not `naive`, and `api.workers = 16`.
@@ -96,6 +114,15 @@ settings.
 tests/integration/api_test.sh            # 56 end-to-end checks through Apache
 ./build/debug/of-ctl invariants          # ledger check, plus shared memory vs MySQL
 ./scripts/load-db.sh --yes               # reset afterwards
+```
+
+The payment suite waits for reservations to expire, so run the daemons with short test
+timings (`conf/test.conf`: your config plus a 4 s TTL):
+
+```sh
+scripts/make-test-conf.sh
+CONF=conf/test.conf scripts/run.sh       # in one terminal
+TTL=4 tests/integration/payment_test.sh  # in another: 56 checks, about a minute
 ```
 
 ## 8. The oversell experiment (gate 2)
@@ -127,6 +154,12 @@ To run one mode by hand while `run.sh` is running:
 | of-core: "another of-core is already listening" | One is already running; stop it first (`pkill of-core`) |
 | of-core: "cannot create shared memory" | A stale object owned by another user; check `ls -l /dev/shm/orderforge` |
 | of-bench FAIL mentioning "oversold units from an earlier run" | A naive run left the ledger unbalanced; reset with `scripts/load-db.sh` |
+| of-core: "pay.hmac_key missing or invalid" | Add a key: `echo "pay.hmac_key = $(openssl rand -hex 32)" >> conf/orderforge.conf` |
+| of-core: "queue ... exists with message size" | The queue was created by an older build; `rm /dev/mqueue/orderforge-pay-*` |
+| of-core: "mq_open ... Invalid argument" | `pay.mq_maxmsg` is above `/proc/sys/fs/mqueue/msg_max` (10 for normal users); keep it at 10 |
+| Orders stay "payment pending" and then cancel | of-pay is not running; start it (or use `scripts/run.sh`) |
+| Reports page says "no sales report yet" | of-report is not running |
+| A MySQL error "Unknown column ... idempotency_key" or "Table 'payments' doesn't exist" | The schema is from an older phase; run `scripts/load-db.sh` |
 | of-core logs `worker_init ... Access denied` | Wrong `db.*` settings in `conf/orderforge.conf`; re-run `sudo ./scripts/setup-db.sh` |
 | `/api/...` requests hang under load | `enablereuse=on` was added to `ProxyPass`; remove it (see the comment in `conf/apache-orderforge.conf`) |
 | Port 8080 already in use | Change `Listen` and `<VirtualHost>` in `conf/apache-orderforge.conf` and reinstall the site |

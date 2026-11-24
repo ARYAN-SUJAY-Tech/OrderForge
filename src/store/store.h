@@ -49,8 +49,19 @@ typedef enum {
 const char *stock_mode_name(stock_mode_t m);
 int         stock_mode_parse(const char *s); /* -1 if unknown */
 
+/*
+ * Payment hand-off. After a checkout commits, the store builds an (unsigned) payment
+ * request and passes it to this callback, which of-core points at its outbox; a sender
+ * thread signs it and puts it on the POSIX message queue to of-pay. Returns 0 when
+ * accepted, -1 when not (the order then simply waits and the expiry reaper cancels it).
+ */
+typedef int (*pay_submit_fn)(void *ctx, const void *pay_request);
+
 typedef struct {
     db_t          *db;
+    pay_submit_fn  pay_submit;     /* NULL: payments are never sent (orders expire) */
+    void          *pay_ctx;
+    int64_t        reservation_ttl_s; /* unpaid orders are cancelled after this */
     stock_table_t *stock;        /* shared-memory table (of-core); NULL disables lockfree */
     stock_mode_t   stock_mode;
     int64_t        naive_delay_us; /* widen the naive race window for demos; 0 in normal use */
@@ -81,6 +92,20 @@ int  store_load_stock(db_t *db, stock_table_t *t, char *err, size_t errlen);
  * *oversold receives the total units sold beyond what existed.
  */
 int  store_check_invariants(db_t *db, const stock_table_t *t, buf_t *out, int64_t *oversold);
+
+/*
+ * Apply a verified reply from of-pay (runs on of-core's background thread).
+ *   success + order still waiting   -> payment succeeded, order paid, reservation committed
+ *   decline + order still waiting   -> payment declined, order cancelled, stock returned
+ *   success after the order expired -> refunded automatically, audited (late success)
+ *   anything else (duplicate reply) -> ignored: only one reply can leave 'pending'
+ * Returns 1 when it changed something, 0 when ignored, -1 on database error.
+ */
+int  store_payment_reply(store_t *s, const void *pay_reply);
+
+/* The expiry reaper: cancel up to `limit` orders whose reservation deadline passed while
+ * unpaid, returning their stock. Returns how many were cancelled, or -1. */
+int  store_expire_reservations(store_t *s, int limit);
 
 void of_resp_init(of_resp_t *r);
 void of_resp_free(of_resp_t *r);

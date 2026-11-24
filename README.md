@@ -13,9 +13,9 @@ Apache.
 |---|---|---|
 | 0 | Setup and spikes: Makefile, sanitizer builds, config, logger, CRC32, three spikes | done |
 | 1 | Baseline store: schema, auth, catalogue, cart, naive checkout, storefront and admin UI | done (gate 1) |
-| 2 | Core engine: of-core, binary protocol, lock-free CAS reservation, three stock modes, of-bench | **done** (gate 2) |
-| 3 | Orders, payments (of-pay) and reports | next |
-| 4 | WAL, crash recovery, supervisor, metrics | |
+| 2 | Core engine: of-core, binary protocol, lock-free CAS reservation, three stock modes, of-bench | done (gate 2) |
+| 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | **done** (gate 3) |
+| 4 | WAL, crash recovery, supervisor, metrics | next |
 | 5 | Hardening | |
 | 6 | Benchmarks and chaos tests | |
 | 7 | Documentation, video, slides | |
@@ -28,7 +28,7 @@ sudo ./scripts/setup-db.sh        # database, user, conf/orderforge.conf (0600)
 make && make test
 ./scripts/load-db.sh              # schema, 24 products, admin and demo accounts
 sudo ./scripts/install-site.sh    # web/ -> /var/www/orderforge, vhost on :8080
-scripts/run.sh                    # of-core + of-api; Ctrl-C stops both
+scripts/run.sh                    # of-core, of-pay, of-report, of-api; Ctrl-C stops all
 ```
 
 Then open <http://localhost:8080/>.
@@ -44,8 +44,9 @@ Details and troubleshooting: [docs/install.md](docs/install.md).
 
 ```
 Browser → Apache → of-api (pre-forked FastCGI) → Unix socket, binary frames → of-core → MySQL
-                                                                               │
-                                                     POSIX shared-memory stock table (CAS)
+                                                                     │          │   ▲
+                                          POSIX shared-memory stock table (CAS) │   └── of-report
+                                                     POSIX message queues (HMAC) ⇄ of-pay
 ```
 
 - **of-core**, the engine:
@@ -59,6 +60,21 @@ Browser → Apache → of-api (pre-forked FastCGI) → Unix socket, binary frame
     access.
   - Reconnects by itself when of-core restarts.
   - The core checks its uid with `SO_PEERCRED`.
+- **Orders:** a state machine (`placed → payment_pending → paid → packed → shipped →
+  delivered`, with exits to `cancelled` and `refunded`). Every transition is one locked,
+  guarded update, and every exit returns the stock.
+- **of-pay**, the mock payment gateway:
+  - Talks to of-core over two POSIX message queues, with HMAC-SHA256 signatures and
+    replay protection.
+  - One epoll loop with a timerfd-driven heap of delayed replies.
+  - A test token chooses approve, decline, timeout, duplicate or slow.
+- **Payment safety:**
+  - A duplicated callback has exactly one effect.
+  - An approval that arrives after expiry is refunded automatically.
+  - Unpaid reservations expire through a timerfd reaper.
+  - Checkout is idempotent via the `Idempotency-Key` header.
+- **of-report**: periodic sales aggregation and CSV files, each written atomically with
+  `fsync` and `rename()`; feeds the admin dashboard.
 - **of-ctl**: `useradd` and `invariants`. The invariant check covers the stock ledger
   and, read-only, compares shared memory with MySQL.
 - **of-bench**: an epoll load generator with a barrier-synchronised rush, latency
@@ -80,7 +96,18 @@ scripts/oversell-experiment.sh     # resets the DB and runs all three stock mode
 
 The lock-free mode rejects the 950 losing buyers with one compare-and-swap each, without
 touching MySQL. Method, hardware and analysis are in
-[docs/design.md](docs/design.md#9-results-so-far).
+[docs/design.md](docs/design.md#10-results-so-far).
+
+## Payments and order tracking (gate 3)
+
+```sh
+scripts/make-test-conf.sh && CONF=conf/test.conf scripts/run.sh   # 4-second reservations
+TTL=4 tests/integration/payment_test.sh                            # 56 checks
+```
+
+The test covers every gateway outcome: approve, decline, silence, duplicate reply, and
+late reply after expiry. It also covers idempotent retries, customer cancel and refund,
+admin pack, ship and deliver, illegal transitions, stock returns and the reports API.
 
 ## Documentation
 

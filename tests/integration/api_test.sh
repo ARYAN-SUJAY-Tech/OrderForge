@@ -119,7 +119,7 @@ req alice POST /cart/items '{"product_id":2,"qty":3}'
 req anon GET /products/2
 STOCK_BEFORE=$(json 'd["product"]["stock"]')
 req alice POST /checkout
-check "checkout" is "$STATUS $(json 'd["order"]["status"]')" "201 placed"
+check "checkout (waits for payment)" is "$STATUS $(json 'd["order"]["status"]')" "201 payment_pending"
 ORDER=$(json 'd["order"]["id"]')
 check "order total is server-computed" is "$(json 'd["order"]["total_paise"]')" "1049700"
 check "order has a timeline event" is "$(json 'd["order"]["events"][0]["to"]')" "placed"

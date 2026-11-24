@@ -29,6 +29,7 @@
 #include "store/internal.h"
 
 #include "common/log.h"
+#include "common/paymsg.h"
 #include "common/util.h"
 
 #include <stdio.h>
@@ -107,12 +108,87 @@ static int take_stock(ctx_t *c, const line_t *l, int64_t *have)
     return 1;
 }
 
+/* Mock payment-method tokens understood by of-pay. No card data is ever handled. */
+static const char *const pay_methods[] = {"tok_success", "tok_decline", "tok_timeout",
+                                          "tok_duplicate", "tok_slow", "tok_random"};
+
+static bool valid_method(const char *m)
+{
+    for (size_t i = 0; i < sizeof pay_methods / sizeof pay_methods[0]; i++)
+        if (strcmp(m, pay_methods[i]) == 0)
+            return true;
+    return false;
+}
+
+/* Idempotency-Key: 8..64 of [A-Za-z0-9_-]. */
+static bool valid_idem_key(const char *k)
+{
+    size_t n = strlen(k);
+    if (n < 8 || n > 64)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((k[i] >= 'a' && k[i] <= 'z') || (k[i] >= 'A' && k[i] <= 'Z') ||
+              (k[i] >= '0' && k[i] <= '9') || k[i] == '-' || k[i] == '_'))
+            return false;
+    return true;
+}
+
+/* An order already created with this key: answer with it (200), create nothing. */
+static bool replay_existing(ctx_t *c, const char *scoped_key)
+{
+    int64_t existing;
+    if (db_query_int(c->db, &existing, "SELECT id FROM orders WHERE idempotency_key = ?", "s",
+                     scoped_key) != 1)
+        return false;
+    LOG_INFO("checkout_replay", "idempotent retry for order %lld", (long long)existing);
+    c->resp->status = 200;
+    if (render_order(c, existing, c->user.id) != 1)
+        resp_db_error(c);
+    return true;
+}
+
+/*
+ * POST /api/checkout   body (optional): {"payment_method": "tok_success"}
+ *                      header (optional): Idempotency-Key: <8..64 chars>
+ *
+ * One transaction creates the order with its items, takes the stock, records the
+ * reservations (with a deadline) and a pending payment, and moves the order to
+ * payment_pending. After the commit the payment request is handed to of-pay. The
+ * order then waits for the gateway's reply, a cancellation, or the expiry reaper.
+ */
 void h_checkout(ctx_t *c)
 {
     static _Thread_local line_t lines[CHECKOUT_MAX_LINES];
     static _Thread_local stock_line_t held[CHECKOUT_MAX_LINES];
     size_t n = 0, nheld = 0;
     int64_t total = 0;
+
+    const char *method = "tok_success";
+    if (c->req->body_len > 0) {
+        if (ctx_json(c))
+            return;
+        const char *m = json_get_str(c->json, "payment_method");
+        if (m)
+            method = m;
+    }
+    if (!valid_method(method)) {
+        resp_error(c, 400, "invalid_payment_method", "unknown payment method");
+        return;
+    }
+
+    /* Keys are scoped to the user, so two customers can never collide. */
+    char scoped_key[96] = "";
+    const char *key = c->req->idem_key ? c->req->idem_key : "";
+    if (*key) {
+        if (!valid_idem_key(key)) {
+            resp_error(c, 400, "invalid_idempotency_key",
+                       "Idempotency-Key must be 8-64 letters, digits, '-' or '_'");
+            return;
+        }
+        snprintf(scoped_key, sizeof scoped_key, "u%lld:%s", (long long)c->user.id, key);
+        if (replay_existing(c, scoped_key))
+            return;
+    }
 
     int64_t cid = cart_id(c);
     if (cid < 0 || db_begin(c->db) != 0) {
@@ -176,9 +252,21 @@ void h_checkout(ctx_t *c)
         nheld = n;
     }
 
-    if (db_exec(c->db, "INSERT INTO orders (user_id, status, total_paise) VALUES (?, 'placed', ?)",
-                "ii", c->user.id, total) != 1)
+    if (db_exec(c->db,
+                "INSERT INTO orders (user_id, status, total_paise, idempotency_key) "
+                "VALUES (?, 'placed', ?, ?)",
+                "iis", c->user.id, total, scoped_key[0] ? scoped_key : NULL) != 1) {
+        if (db_errno(c->db) == DB_ER_DUP_ENTRY && scoped_key[0]) {
+            /* The same key won a race on another worker: give back, answer with theirs. */
+            (void)db_rollback(c->db);
+            if (nheld)
+                stock_release_all(c->s->stock, held, nheld);
+            if (!replay_existing(c, scoped_key))
+                resp_error(c, 409, "conflict", "please retry");
+            return;
+        }
         goto db_failed;
+    }
     int64_t order_id = (int64_t)db_insert_id(c->db);
 
     char actor[32];
@@ -209,19 +297,46 @@ void h_checkout(ctx_t *c)
             db_exec(c->db,
                     "INSERT INTO stock_movements (product_id, delta, reason, order_id, actor) "
                     "VALUES (?, ?, 'sale', ?, ?)",
-                    "iiis", l->product_id, -l->qty, order_id, actor) != 1)
+                    "iiis", l->product_id, -l->qty, order_id, actor) != 1 ||
+            db_exec(c->db,
+                    "INSERT INTO reservations (order_id, product_id, qty, expires_at) "
+                    "VALUES (?, ?, ?, NOW(3) + INTERVAL ? SECOND)",
+                    "iiii", order_id, l->product_id, l->qty, c->s->reservation_ttl_s) != 1)
             goto db_failed;
     }
 
-    if (order_event(c->db, order_id, NULL, "placed", actor, "order placed") != 0 ||
+    char pay_key[48];
+    snprintf(pay_key, sizeof pay_key, "pay-%lld-1", (long long)order_id);
+    if (db_exec(c->db,
+                "INSERT INTO payments (order_id, idem_key, method, amount_paise) VALUES (?, ?, ?, ?)",
+                "issi", order_id, pay_key, method, total) != 1 ||
+        order_event(c->db, order_id, NULL, "placed", actor, "order placed") != 0 ||
+        order_move(c->s, c->db, order_id, ORDER_PLACED, ORDER_PAYMENT_PENDING, "of-core",
+                   "sent to the payment gateway", NULL) != 1 ||
         db_exec(c->db, "DELETE FROM cart_items WHERE cart_id = ?", "i", cid) < 0 ||
         db_commit(c->db) != 0)
         goto db_failed;
 
-    /* Durable in MySQL: the reservation becomes a sale. */
+    /* Durable in MySQL: the shared-memory reservation is now held by the order itself. */
     if (nheld)
         stock_commit_all(c->s->stock, held, nheld);
     STORE_METRIC_ADD(c->s, orders_total, 1);
+
+    /* Hand the payment to of-pay. If that fails the order stays payment_pending and the
+     * reaper cancels it when the reservation expires: no stock is ever stranded. */
+    pay_msg_t req;
+    memset(&req, 0, sizeof req);
+    req.kind = PAY_REQUEST;
+    req.order_id = (uint64_t)order_id;
+    req.amount_paise = total;
+    snprintf(req.idem_key, sizeof req.idem_key, "%s", pay_key);
+    snprintf(req.method, sizeof req.method, "%s", method);
+    if (!c->s->pay_submit || c->s->pay_submit(c->s->pay_ctx, &req) != 0)
+        LOG_WARN("payment_not_sent", "order %lld: payment outbox full or gateway disabled; "
+                                     "it will expire",
+                 (long long)order_id);
+    else
+        STORE_METRIC_ADD(c->s, payments_sent, 1);
 
     LOG_DEBUG("checkout", "order %lld user %lld total %lld paise lines %zu", (long long)order_id,
               (long long)c->user.id, (long long)total, n);
@@ -312,7 +427,44 @@ int render_order(ctx_t *c, int64_t order_id, int64_t owner_only)
         buf_puts(b, "}");
     }
     db_res_free(&r);
-    buf_puts(b, "]}}");
+    buf_puts(b, "]");
+
+    /* The latest payment attempt, if any. */
+    if (db_query(c->db, &r,
+                 "SELECT status, method, provider_ref, note, amount_paise FROM payments "
+                 "WHERE order_id = ? ORDER BY id DESC LIMIT 1",
+                 "i", order_id) != 0)
+        return -1;
+    if (db_fetch(&r) == 1) {
+        buf_puts(b, ",\"payment\":{");
+        buf_json_kv_str(b, "status", db_str(&r, 0));
+        buf_puts(b, ",");
+        buf_json_kv_str(b, "method", db_str(&r, 1));
+        buf_puts(b, ",");
+        buf_json_kv_str(b, "provider_ref", db_str(&r, 2));
+        buf_puts(b, ",");
+        buf_json_kv_str(b, "note", db_str(&r, 3));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "amount_paise", db_int(&r, 4));
+        buf_puts(b, "}");
+    }
+    db_res_free(&r);
+
+    /* While unpaid: when the reservation runs out (the UI shows a countdown). */
+    if (db_query(c->db, &r,
+                 "SELECT " ISO("MIN(expires_at)") ", "
+                 "  GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(3), MIN(expires_at))) "
+                 "FROM reservations WHERE order_id = ? AND state = 'active'",
+                 "i", order_id) != 0)
+        return -1;
+    if (db_fetch(&r) == 1 && !db_null(&r, 0)) {
+        buf_puts(b, ",");
+        buf_json_kv_str(b, "reservation_expires_at", db_str(&r, 0));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "reservation_seconds_left", db_int(&r, 1));
+    }
+    db_res_free(&r);
+    buf_puts(b, "}}");
     return 1;
 }
 

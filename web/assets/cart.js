@@ -4,6 +4,7 @@
   await OF.init('cart');
   if (!OF.requireLogin()) return;
   const root = document.getElementById('cart');
+  let checkoutKey = OF.newKey(); // Idempotency-Key for this checkout attempt
 
   function render(cart) {
     OF.renderCartCount(cart.units);
@@ -29,13 +30,26 @@
         el('td', {}, remove));
     });
 
+    // Mock payment: the token decides what the gateway does. No card data exists.
+    const method = el('select', { id: 'pay-method', 'aria-label': 'Payment method' },
+      el('option', { value: 'tok_success' }, 'Test card: always approved'),
+      el('option', { value: 'tok_decline' }, 'Test card: always declined'),
+      el('option', { value: 'tok_timeout' }, 'Test card: gateway never answers'),
+      el('option', { value: 'tok_duplicate' }, 'Test card: approved, reply sent twice'),
+      el('option', { value: 'tok_random' }, 'Test card: random outcome'));
+
     const checkout = el('button', { class: 'btn' }, 'Place order');
     checkout.addEventListener('click', async () => {
       checkout.disabled = true;
       try {
-        const { order } = await api('POST', '/checkout');
+        const { order } = await api('POST', '/checkout', { payment_method: method.value },
+          { 'Idempotency-Key': checkoutKey });
+        checkoutKey = OF.newKey(); // the next order is a new attempt
         location.href = `/orders.html?id=${order.id}&placed=1`;
       } catch (e) {
+        // A network failure keeps the same key, so a retry can never create a second
+        // order; an answer from the server (e.g. out of stock) starts a new attempt.
+        if (e.status) checkoutKey = OF.newKey();
         toast(e.message, 'error');
         checkout.disabled = false;
         load();
@@ -50,8 +64,12 @@
         el('tbody', {}, rows))),
       el('div', { class: 'summary' },
         el('span', { class: 'muted' }, `${cart.units} item${cart.units === 1 ? '' : 's'}`),
-        el('span', {}, 'Total ', el('strong', {}, money(cart.total_paise))),
-        checkout));
+        el('span', {}, 'Total ', el('strong', {}, money(cart.total_paise)))),
+      el('div', { class: 'summary' },
+        el('label', { class: 'inline' }, 'Pay with', method),
+        checkout),
+      el('p', { class: 'muted right' },
+        'Payments go to a mock gateway. Choose a test card to try each outcome.'));
   }
 
   async function update(productId, qty) {

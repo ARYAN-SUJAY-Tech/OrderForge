@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderForge – Admin · Reports</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header id="site-header"></header>
+  <main>
+    <h1>Admin · Reports &amp; system health</h1>
+    <div class="toolbar">
+      <select id="days" aria-label="Report window">
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+      </select>
+      <span class="spacer"></span>
+      <span class="muted">Export CSV</span>
+      <button class="btn btn-ghost btn-sm" data-export="daily_sales">Daily sales</button>
+      <button class="btn btn-ghost btn-sm" data-export="top_products">Top products</button>
+      <button class="btn btn-ghost btn-sm" data-export="low_stock">Low stock</button>
+      <button class="btn btn-ghost btn-sm" data-export="order_status">Order status</button>
+    </div>
+
+    <p class="muted small" id="generated"></p>
+    <div class="kpis" id="kpis"></div>
+
+    <section class="card">
+      <h2 class="chart-title">Daily revenue</h2>
+      <p class="muted" id="chart-sub"></p>
+      <div class="chart" id="chart"></div>
+      <details>
+        <summary>Show as a table</summary>
+        <div class="table-wrap"><table id="daily-table"></table></div>
+      </details>
+    </section>
+
+    <div class="two-col">
+      <section class="card">
+        <h2>Top products</h2>
+        <div class="table-wrap"><table id="top"></table></div>
+      </section>
+      <section class="card">
+        <h2>Low stock</h2>
+        <div class="table-wrap"><table id="low"></table></div>
+      </section>
+    </div>
+
+    <div class="two-col">
+      <section class="card">
+        <h2>Orders by status</h2>
+        <div class="chips" id="status-counts"></div>
+        <h2>Payments by outcome</h2>
+        <div class="chips" id="payment-counts"></div>
+      </section>
+      <section class="card">
+        <h2>System health <span class="muted small">(live, every 2 s, from shared memory)</span></h2>
+        <dl class="health" id="health"></dl>
+      </section>
+    </div>
+  </main>
+  <script src="/assets/app.js"></script>
+  <script src="/assets/reports.js"></script>
+</body>
+</html>

@@ -441,6 +441,8 @@ void h_admin_system(ctx_t *c)
     buf_t *b = &c->resp->body;
     buf_puts(b, "{");
     buf_json_kv_str(b, "stock_mode", stock_mode_name(c->s->stock_mode));
+    buf_puts(b, ",");
+    buf_json_kv_int(b, "reservation_ttl_s", c->s->reservation_ttl_s);
     if (c->s->stock && c->s->stock->shm) {
         const stock_shm_t *h = c->s->stock->shm;
         const stock_metrics_t *m = &h->metrics;
@@ -462,6 +464,21 @@ void h_admin_system(ctx_t *c)
         buf_json_kv_int(b, "cas_retries", (int64_t)atomic_load(&m->cas_retries));
         buf_puts(b, ",");
         buf_json_kv_int(b, "active_workers", (int64_t)atomic_load(&m->active_workers));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "payments_sent", (int64_t)atomic_load(&m->payments_sent));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "payments_succeeded", (int64_t)atomic_load(&m->payments_succeeded));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "payments_declined", (int64_t)atomic_load(&m->payments_declined));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "payments_ignored", (int64_t)atomic_load(&m->payments_ignored));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "payments_rejected", (int64_t)atomic_load(&m->payments_rejected));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "late_refunds", (int64_t)atomic_load(&m->late_refunds));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "reservations_expired",
+                        (int64_t)atomic_load(&m->reservations_expired));
         buf_puts(b, "}");
     }
     buf_puts(b, "}");

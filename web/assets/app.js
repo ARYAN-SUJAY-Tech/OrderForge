@@ -6,8 +6,8 @@
 const OF = (() => {
   let session = null; // { user: {id,email,name,role}, csrf_token }
 
-  async function api(method, path, body) {
-    const opts = { method, headers: {}, credentials: 'same-origin' };
+  async function api(method, path, body, headers) {
+    const opts = { method, headers: { ...(headers || {}) }, credentials: 'same-origin' };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -156,8 +156,47 @@ const OF = (() => {
     return session;
   }
 
+  // A fresh idempotency key: 32 random hex characters (works without a secure context).
+  function newKey() {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  }
+
+  // Secondary navigation shared by the admin pages.
+  function adminNav(active) {
+    const items = [['/admin/', 'Products', 'products'], ['/admin/orders.html', 'Orders', 'orders'],
+      ['/admin/reports.html', 'Reports & health', 'reports']];
+    return el('nav', { class: 'subnav' }, items.map(([href, label, key]) =>
+      el('a', { href, class: key === active ? 'active' : null }, label)));
+  }
+
+  // Offer text as a file download (used for the CSV exports).
+  function download(filename, text, type = 'text/csv') {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = el('a', { href: url, download: filename });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  const FINAL = ['delivered', 'cancelled', 'refunded'];
+  function isFinal(status) { return FINAL.includes(status); }
+
+  // Admin moves allowed from each state (mirrors src/common/order_state.c).
+  const ADMIN_NEXT = {
+    placed: [['cancelled', 'Cancel']],
+    payment_pending: [['cancelled', 'Cancel']],
+    paid: [['packed', 'Mark packed'], ['refunded', 'Refund']],
+    packed: [['shipped', 'Mark shipped'], ['refunded', 'Refund']],
+    shipped: [['delivered', 'Mark delivered']],
+  };
+  function adminNext(status) { return ADMIN_NEXT[status] || []; }
+
   return {
     api, init, loadSession, setSession, user, isAdmin, el, money, fmtDate, qs,
     statusBadge, stockBadge, toast, safeNext, requireLogin, addToCart, renderCartCount,
+    newKey, adminNav, download, isFinal, adminNext,
   };
 })();

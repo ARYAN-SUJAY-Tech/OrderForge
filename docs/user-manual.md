@@ -37,19 +37,43 @@ On the cart page you can:
 
 Prices always come from the store, so they cannot be changed in the browser.
 
-### Place an order
+### Place an order and pay
 
-Choose **Place order** on the cart page.
+Choose a test card under **Pay with**, then choose **Place order**.
+
+| Test card | Outcome |
+|---|---|
+| Always approved | The payment is approved |
+| Always declined | The payment is declined |
+| Gateway never answers | The gateway stays silent |
+| Approved, reply sent twice | Approved, with the gateway's reply arriving twice |
+| Random outcome | Any of the above |
+
+No real card details are asked for or stored.
 
 - **If an item has run out:** the order is not placed, and a message names the product
   and how many are left.
-- **If the order is placed:** you go to the order's tracking page.
+- **If the order is placed:** you go to its tracking page.
+  - While the payment is processing, the page shows *Waiting for the payment gateway*
+    and how many seconds your items stay reserved.
+  - **Approved:** the order becomes *Paid*.
+  - **Declined, or no answer in time:** the order is cancelled, nothing is charged,
+    and the items go back on sale.
+- **Clicking twice, or retrying after a network error,** never creates a second order.
 
 ### Track orders
 
-**Orders** lists every order you have placed. Open one to see its items, its total
-and a **Tracking** timeline of every status change. The page refreshes itself every
-few seconds.
+**Orders** lists every order you have placed. Open one to see its items, total,
+payment status and a **Tracking** timeline of every status change. The page refreshes
+itself every 2 seconds until the order is finished.
+
+### Cancel an order
+
+On an order's page:
+
+- **Before payment:** **Cancel order** cancels it.
+- **Paid but not yet packed:** **Cancel and refund** refunds it.
+- **Packed or later:** it can no longer be cancelled from the shop.
 
 ## Administrators
 
@@ -72,10 +96,39 @@ Log in with an admin account. An **Admin** link appears in the header.
 
 Every change is recorded in the audit log and the stock ledger.
 
-### Orders (Admin → Order board)
+The admin pages have three tabs: **Products**, **Orders** and **Reports & health**.
+
+### Orders (Admin → Orders)
 
 Lists every order with its customer, status, item count and total. You can filter by
-status, and the board refreshes itself every 5 seconds. Open an order to see its
-timeline.
+status, and the board refreshes itself every 5 seconds.
 
-Packing, shipping, delivery, cancellation and refunds arrive in phase 3.
+Each row shows only the moves allowed from its current state:
+
+| Status | Buttons |
+|---|---|
+| Paid | **Mark packed**, **Refund** |
+| Packed | **Mark shipped**, **Refund** |
+| Shipped | **Mark delivered** |
+| Unpaid | **Cancel** |
+
+- Refunds and cancellations return the stock.
+- Only the payment gateway can mark an order *Paid*.
+- Open an order to see its payment and full timeline. The same buttons appear there.
+
+### Reports & health (Admin → Reports & health)
+
+- **Figures for the last 7, 30 or 90 days:** revenue, paid orders, units sold and
+  average order value.
+- **Daily revenue chart:** hover over a bar for the day's figures; choose *Show as a
+  table* for the numbers.
+- **Lists:** top products, the low-stock list, and live counts of orders by status and
+  payments by outcome.
+- **Export CSV** downloads the latest report files written by of-report.
+- **System health** updates every 2 seconds. It shows:
+  - the stock mode;
+  - requests, queue depth and busy rejections;
+  - CAS retries;
+  - payment outcomes (sent, approved, declined, duplicates ignored, forged messages
+    rejected, late payments refunded);
+  - expired reservations.

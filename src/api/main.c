@@ -25,9 +25,11 @@
  */
 #include "common/buf.h"
 #include "common/config.h"
+#include "common/harden.h"
 #include "common/log.h"
 #include "common/metrics.h"
 #include "common/proto.h"
+#include "common/ratelimit.h"
 #include "common/stock.h"
 #include "common/util.h"
 
@@ -68,8 +70,16 @@ typedef struct {
     int         status;
     char        set_cookie[OF_MAX_COOKIE + 1];
     const char *content_type; /* NULL: JSON */
+    int         retry_after_s; /* > 0: send a Retry-After header (429) */
     buf_t       body;
 } api_resp_t;
+
+/* ------------------------------------------------------------------ edge protection */
+
+/* Shared-memory token buckets, created by the parent before fork (workers inherit). */
+static rl_table_t rl;
+static bool       rl_enabled;
+static rl_rule_t  rule_ip, rule_session, rule_auth;
 
 static int      core_fd = -1;
 static char     core_path[108];
@@ -256,18 +266,21 @@ static of_method_t parse_method(const char *m)
 static void send_response(FCGX_Request *rq, const api_resp_t *resp)
 {
     /* Headers are formatted with snprintf: libfcgi's own printf does not know %zu. */
+    char retry[48] = "";
+    if (resp->retry_after_s > 0)
+        snprintf(retry, sizeof retry, "Retry-After: %d\r\n", resp->retry_after_s);
     char head[512 + OF_MAX_COOKIE];
     int n = snprintf(head, sizeof head,
                      "Status: %d %s\r\n"
                      "Content-Type: %s\r\n"
                      "Cache-Control: no-store\r\n"
                      "X-Content-Type-Options: nosniff\r\n"
-                     "%s%s%s"
+                     "%s%s%s%s"
                      "Content-Length: %zu\r\n\r\n",
                      resp->status, of_status_text(resp->status),
                      resp->content_type ? resp->content_type : "application/json; charset=utf-8",
                      resp->set_cookie[0] ? "Set-Cookie: " : "", resp->set_cookie,
-                     resp->set_cookie[0] ? "\r\n" : "", resp->body.len);
+                     resp->set_cookie[0] ? "\r\n" : "", retry, resp->body.len);
     if (n < 0 || (size_t)n >= sizeof head)
         return;
     FCGX_PutStr(head, n, rq->out);
@@ -313,6 +326,87 @@ static void serve_metrics(const char *ip, api_resp_t *resp)
     buf_reset(&resp->body);
     metrics_format(&t, &resp->body);
     stock_close(&t, false);
+    if (rl_enabled)
+        buf_printf(&resp->body,
+                   "# HELP orderforge_ratelimit_allowed_total Requests within the rate limits.\n"
+                   "# TYPE orderforge_ratelimit_allowed_total counter\n"
+                   "orderforge_ratelimit_allowed_total %llu\n"
+                   "# HELP orderforge_ratelimit_limited_total Requests refused with 429.\n"
+                   "# TYPE orderforge_ratelimit_limited_total counter\n"
+                   "orderforge_ratelimit_limited_total %llu\n"
+                   "# HELP orderforge_ratelimit_table_full_total Requests allowed because the "
+                   "bucket table was full.\n"
+                   "# TYPE orderforge_ratelimit_table_full_total counter\n"
+                   "orderforge_ratelimit_table_full_total %llu\n",
+                   (unsigned long long)atomic_load(&rl.shm->allowed),
+                   (unsigned long long)atomic_load(&rl.shm->limited),
+                   (unsigned long long)atomic_load(&rl.shm->table_full));
+}
+
+/*
+ * Checks made at the edge, before a request reaches of-core (cheapest first):
+ *  1. Rate limits (token buckets in shared memory, shared by every worker process):
+ *     per client IP, per session, and a strict one for login/registration per IP
+ *     against password guessing. Over the limit: 429 with Retry-After.
+ *  2. Cross-site requests: a state-changing request whose Origin header names another
+ *     site is refused (403). Browsers always send Origin on cross-site POSTs.
+ *  3. Request bodies must be JSON. A cross-site HTML form can only send
+ *     application/x-www-form-urlencoded, multipart/form-data or text/plain; with
+ *     enctype=text/plain an attacker can even shape the body into valid JSON
+ *     ({"email":"..","password":"..","x":"=.."}) to log a victim into the attacker's
+ *     account (login CSRF). Requiring application/json closes that: a page from another
+ *     site cannot send it without a CORS preflight, which we never grant.
+ * Returns 0 to continue, or fills resp and returns -1.
+ */
+static int edge_checks(FCGX_Request *rq, const of_req_t *req, const char *path, int64_t clen,
+                       const char *session, api_resp_t *resp)
+{
+    if (rl_enabled) {
+        char key[OF_MAX_TOKEN + 16];
+        int64_t now = rl_now_ms(), wait = 0;
+        snprintf(key, sizeof key, "ip:%s", req->ip);
+        wait = rl_take(&rl, key, &rule_ip, now);
+        if (!wait && session[0]) {
+            snprintf(key, sizeof key, "s:%.32s", session);
+            wait = rl_take(&rl, key, &rule_session, now);
+        }
+        if (!wait && req->method == OF_POST &&
+            (strcmp(path, "/api/auth/login") == 0 || strcmp(path, "/api/auth/register") == 0)) {
+            snprintf(key, sizeof key, "auth:%s", req->ip);
+            wait = rl_take(&rl, key, &rule_auth, now);
+        }
+        if (wait) {
+            api_error(resp, 429, "rate_limited", "too many requests, slow down");
+            resp->retry_after_s = (int)((wait + 999) / 1000);
+            LOG_INFO("rate_limited", "%s %s from %s", req->path, session[0] ? "(session)" : "",
+                     req->ip);
+            return -1;
+        }
+    }
+
+    if (req->method != OF_GET) {
+        const char *origin = FCGX_GetParam("HTTP_ORIGIN", rq->envp);
+        const char *host = FCGX_GetParam("HTTP_HOST", rq->envp);
+        if (origin) {
+            const char *o = strstr(origin, "://");
+            o = o ? o + 3 : origin;
+            if (strcmp(origin, "null") == 0 || !host || strcmp(o, host) != 0) {
+                api_error(resp, 403, "cross_origin", "cross-site requests are not allowed");
+                LOG_WARN("cross_origin", "%s from Origin %s refused (Host %s)", path, origin,
+                         host ? host : "-");
+                return -1;
+            }
+        }
+        if (clen > 0) {
+            const char *ct = FCGX_GetParam("CONTENT_TYPE", rq->envp);
+            if (!ct || strncasecmp(ct, "application/json", 16) != 0) {
+                api_error(resp, 415, "unsupported_media_type",
+                          "request bodies must be application/json");
+                return -1;
+            }
+        }
+    }
+    return 0;
 }
 
 static void serve_one(FCGX_Request *rq, api_resp_t *resp)
@@ -345,6 +439,7 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
     resp->status = 0;
     resp->set_cookie[0] = '\0';
     resp->content_type = NULL;
+    resp->retry_after_s = 0;
     buf_reset(&resp->body);
 
     /* Validate at the edge what the protocol caps anyway, with friendlier errors. */
@@ -361,10 +456,15 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
         api_error(resp, 400, "bad_request", "query string or header too long");
 
     int64_t clen = 0;
-    if (resp->status == 0 && clen_s && *clen_s) {
-        if (of_parse_i64(clen_s, 0, INT64_MAX, &clen) != 0)
-            api_error(resp, 400, "bad_request", "bad Content-Length");
-        else if ((size_t)clen > sizeof body - 1)
+    if (resp->status == 0 && clen_s && *clen_s && of_parse_i64(clen_s, 0, INT64_MAX, &clen) != 0)
+        api_error(resp, 400, "bad_request", "bad Content-Length");
+    if (resp->status == 0) {
+        (void)of_cookie_get(FCGX_GetParam("HTTP_COOKIE", rq->envp), "of_session", session,
+                            sizeof session);
+        (void)edge_checks(rq, &req, path, clen, session, resp);
+    }
+    if (resp->status == 0 && clen > 0) {
+        if ((size_t)clen > sizeof body - 1)
             api_error(resp, 413, "too_large", "request body too large");
         else if (read_body(rq, body, (size_t)clen) != 0)
             api_error(resp, 400, "bad_request", "truncated body");
@@ -377,8 +477,6 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
     if (resp->status == 0 && req.method == OF_GET && strcmp(path, "/api/metrics") == 0) {
         serve_metrics(req.ip, resp);
     } else if (resp->status == 0) {
-        (void)of_cookie_get(FCGX_GetParam("HTTP_COOKIE", rq->envp), "of_session", session,
-                            sizeof session);
         core_call(&req, resp);
     }
 
@@ -536,6 +634,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "of-api: %s\n", err);
         return 1;
     }
+    /* Before opening any file: leave root if started as root, then harden. */
+    if (of_drop_privileges(&cfg, "of-api", err, sizeof err) < 0) {
+        fprintf(stderr, "of-api: %s\n", err);
+        return 1;
+    }
+    of_harden(conf_path, &cfg, "of-api");
     if (of_log_open_config(&cfg, "of-api") != 0)
         return 1;
     char pid_path[512];
@@ -559,6 +663,30 @@ int main(int argc, char **argv)
         return 1;
     }
     snprintf(core_path, sizeof core_path, "%s", cpath);
+
+    /* Rate limits. Rates are per second except the auth rule (per minute). */
+    int r[7];
+    rl_enabled = of_config_get_long(&cfg, "api.rate_limit", 1, 0, 1, &r[0]) == 1;
+    rule_ip.rate_milli_per_s =
+        (uint32_t)of_config_get_long(&cfg, "api.rate_ip_per_s", 500, 1, 1000000, &r[1]) * 1000;
+    rule_ip.burst = (uint32_t)of_config_get_long(&cfg, "api.rate_ip_burst", 2000, 1, RL_MAX_BURST, &r[2]);
+    rule_session.rate_milli_per_s =
+        (uint32_t)of_config_get_long(&cfg, "api.rate_session_per_s", 20, 1, 1000000, &r[3]) * 1000;
+    rule_session.burst =
+        (uint32_t)of_config_get_long(&cfg, "api.rate_session_burst", 40, 1, RL_MAX_BURST, &r[4]);
+    rule_auth.rate_milli_per_s =
+        (uint32_t)(of_config_get_long(&cfg, "api.rate_auth_per_min", 30, 1, 60000, &r[5]) * 1000 / 60);
+    rule_auth.burst = (uint32_t)of_config_get_long(&cfg, "api.rate_auth_burst", 30, 1, RL_MAX_BURST, &r[6]);
+    for (int i = 0; i < 7; i++)
+        if (!r[i]) {
+            fprintf(stderr, "of-api: an api.rate_* setting is out of range\n");
+            return 1;
+        }
+    if (rl_enabled &&
+        rl_create(&rl, of_config_get(&cfg, "api.rate_shm_name", "/orderforge-rl"), 65536) != 0) {
+        fprintf(stderr, "of-api: cannot create the rate-limit table: %s\n", strerror(errno));
+        return 1;
+    }
     const char *bind = of_config_get(&cfg, "api.listen", "127.0.0.1:9000");
 
     if (FCGX_Init() != 0) {
@@ -607,6 +735,8 @@ int main(int argc, char **argv)
         if (sig == SIGTERM || sig == SIGINT) {
             LOG_INFO("shutdown", "received %s, stopping workers", strsignal(sig));
             shutdown_workers();
+            if (rl_enabled)
+                rl_close(&rl, true);
             LOG_INFO("shutdown", "of-api stopped");
             return 0;
         }

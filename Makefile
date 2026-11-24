@@ -4,6 +4,7 @@
 #   make MODE=release    optimised, hardened build
 #   make MODE=asan       AddressSanitizer build   (also: tsan, ubsan)
 #   make test            build and run the unit tests
+#   make valgrind        run the unit tests under Valgrind memcheck
 #   make spikes          build the phase-0 spikes
 #   make deps            report which libraries were found
 #   make clean
@@ -104,7 +105,7 @@ ifeq ($(HAVE_FCGI),1)
   SPIKES += $(BUILD)/spikes/fcgi_hello
 endif
 
-.PHONY: all bins test spikes deps clean check-deps
+.PHONY: all bins test valgrind spikes deps clean check-deps
 all: check-deps bins spikes
 
 check-deps:
@@ -163,6 +164,18 @@ test: $(TEST_BIN)
 	  if $(RUN) $$t; then pass=$$((pass+1)); else fail=$$((fail+1)); echo "FAILED: $$t"; fi; \
 	done; \
 	echo "unit tests: $$pass passed, $$fail failed"; test $$fail -eq 0
+
+# --- unit tests under Valgrind memcheck (debug or release builds; not with sanitizers).
+# Fails on any memory error or definite leak; forked children are checked too.
+VALGRIND := valgrind -q --error-exitcode=99 --leak-check=full --errors-for-leak-kinds=definite \
+            --trace-children=yes --child-silent-after-fork=no
+valgrind: $(TEST_BIN)
+	@pass=0; fail=0; \
+	for t in $(TEST_BIN); do \
+	  if $(VALGRIND) $$t >/dev/null; then pass=$$((pass+1)); echo "valgrind clean: $$t"; \
+	  else fail=$$((fail+1)); echo "VALGRIND FAILED: $$t"; fi; \
+	done; \
+	echo "valgrind: $$pass clean, $$fail failed"; test $$fail -eq 0
 
 # --- spikes
 spikes: $(SPIKES)

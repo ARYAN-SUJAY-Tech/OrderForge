@@ -3,6 +3,7 @@
 #include "common/queue.h"
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 
@@ -40,9 +41,13 @@ static void *producer(void *arg)
 {
     uintptr_t base = (uintptr_t)arg * PER_PRODUCER;
     for (uintptr_t i = 1; i <= PER_PRODUCER; i++) {
-        /* Retry on full: counts how often backpressure happened. */
-        while (!queue_try_push(&shared, (void *)(base + i)))
+        /* Retry on full: counts how often backpressure happened. Yield the CPU instead of
+         * spinning, so the consumers get to run (a tight loop nearly livelocks under
+         * Valgrind, which runs one thread at a time). */
+        while (!queue_try_push(&shared, (void *)(base + i))) {
             atomic_fetch_add(&n_rejected, 1);
+            sched_yield();
+        }
     }
     return NULL;
 }

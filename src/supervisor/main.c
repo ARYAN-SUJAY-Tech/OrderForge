@@ -27,6 +27,7 @@
  * to <run.dir>/supervisor.status (atomically, with rename) for `of-ctl status`.
  */
 #include "common/config.h"
+#include "common/harden.h"
 #include "common/log.h"
 #include "common/util.h"
 
@@ -333,6 +334,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "of-supervisor: %s\n", err);
         return 1;
     }
+    /* Before opening any file: leave root if started as root, then harden. */
+    if (of_drop_privileges(&cfg, "of-supervisor", err, sizeof err) < 0) {
+        fprintf(stderr, "of-supervisor: %s\n", err);
+        return 1;
+    }
+    of_harden(conf_path, &cfg, "of-supervisor");
     if (of_log_open_config(&cfg, "of-supervisor") != 0 || load_policy(&cfg) != 0) {
         fprintf(stderr, "of-supervisor: bad log or supervisor.* settings\n");
         return 1;

@@ -35,12 +35,15 @@
 #include "common/buf.h"
 #include "common/config.h"
 #include "common/log.h"
+#include "common/paymsg.h"
 #include "common/stock.h"
 #include "common/util.h"
 #include "store/db.h"
 #include "store/store.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <mqueue.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -79,7 +82,8 @@ static void usage(void)
             "                [--qty Q] [--threads T] [--url http://host:port] [--admin EMAIL]\n"
             "                [--csv FILE]        (admin password: $OF_ADMIN_PASSWORD)\n"
             "       of-bench [-c config] load [--clients N] [--duration S] [--restock N]\n"
-            "                [--method tok_success] [--url http://host:port] [--csv FILE]\n");
+            "                [--method tok_success] [--url http://host:port] [--csv FILE]\n"
+            "       of-bench [-c config] inject ORDER_ID   (forged/stale/replayed payment replies)\n");
     exit(2);
 }
 
@@ -974,6 +978,93 @@ static int cmd_load(int argc, char **argv)
     return pass ? 0 : 1;
 }
 
+/* ------------------------------------------------------------------ message injection */
+/*
+ * of-bench inject ORDER_ID: attack the payment channel directly, the way a hostile
+ * process on the same machine could, by writing into of-core's reply queue:
+ *   1. a forged approval, signed with a random key      -> must be rejected (bad MAC)
+ *   2. a correctly signed approval stamped 10 minutes ago -> must be rejected (stale)
+ *   3. a correctly signed approval                       -> accepted: the order is paid
+ *   4. the very same message again                       -> must be rejected (replayed nonce)
+ * The caller checks the order and the payments_rejected metric afterwards. Use an order
+ * whose gateway never answers (tok_timeout) so only these messages can decide it.
+ */
+static int send_reply(mqd_t q, const pay_msg_t *m, const char *what)
+{
+    if (mq_send(q, (const char *)m, sizeof *m, 0) != 0) {
+        fprintf(stderr, "of-bench: mq_send (%s): %s\n", what, strerror(errno));
+        return -1;
+    }
+    printf("  sent %s\n", what);
+    fflush(stdout);
+    pause_ms(400);
+    return 0;
+}
+
+static int cmd_inject(int argc, char **argv)
+{
+    int64_t order_id;
+    if (argc != 1 || of_parse_i64(argv[0], 1, INT64_MAX, &order_id) != 0)
+        usage();
+    uint8_t key[PAY_KEY_LEN], bad[PAY_KEY_LEN];
+    if (sodium_init() < 0 || pay_key_from_hex(of_config_get(&cfg, "pay.hmac_key", ""), key) != 0) {
+        fprintf(stderr, "of-bench: pay.hmac_key missing or invalid\n");
+        return 1;
+    }
+    char err[256];
+    db_t *db = db_connect(&cfg, err, sizeof err);
+    if (!db) {
+        fprintf(stderr, "of-bench: database: %s\n", err);
+        return 1;
+    }
+    db_res_t r;
+    pay_msg_t m;
+    memset(&m, 0, sizeof m);
+    if (db_query(db, &r, "SELECT idem_key, amount_paise FROM payments WHERE order_id = ? "
+                         "ORDER BY id DESC LIMIT 1", "i", order_id) != 0 || db_fetch(&r) != 1) {
+        fprintf(stderr, "of-bench: order %lld has no payment\n", (long long)order_id);
+        return 1;
+    }
+    snprintf(m.idem_key, sizeof m.idem_key, "%s", db_str(&r, 0));
+    m.amount_paise = db_int(&r, 1);
+    db_res_free(&r);
+    db_close(db);
+
+    m.kind = PAY_REPLY;
+    m.outcome = PAY_SUCCEEDED;
+    m.order_id = (uint64_t)order_id;
+    snprintf(m.method, sizeof m.method, "tok_injected");
+    mqd_t q = mq_open(of_config_get(&cfg, "pay.reply_queue", "/orderforge-pay-rep"),
+                      O_WRONLY | O_CLOEXEC);
+    if (q == (mqd_t)-1) {
+        fprintf(stderr, "of-bench: mq_open: %s\n", strerror(errno));
+        return 1;
+    }
+    printf("of-bench inject: order %lld, payment %s\n", (long long)order_id, m.idem_key);
+
+    pay_msg_t forged = m;
+    randombytes_buf(bad, sizeof bad);
+    snprintf(forged.provider_ref, sizeof forged.provider_ref, "inject_forged");
+    pay_sign(&forged, bad);
+    int rc = send_reply(q, &forged, "1. forged approval (wrong key)");
+
+    pay_msg_t stale = m;
+    snprintf(stale.provider_ref, sizeof stale.provider_ref, "inject_stale");
+    pay_sign(&stale, key);
+    stale.ts_ms -= 10 * 60 * 1000; /* then re-MAC, so only the timestamp is wrong */
+    crypto_auth_hmacsha256(stale.mac, (const unsigned char *)&stale, offsetof(pay_msg_t, mac),
+                           key);
+    rc |= send_reply(q, &stale, "2. signed approval, 10 minutes old");
+
+    pay_msg_t valid = m;
+    snprintf(valid.provider_ref, sizeof valid.provider_ref, "inject_valid");
+    pay_sign(&valid, key);
+    rc |= send_reply(q, &valid, "3. genuine signed approval");
+    rc |= send_reply(q, &valid, "4. the same message again (replay)");
+    mq_close(q);
+    return rc ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *conf_path = "conf/orderforge.conf";
@@ -998,6 +1089,8 @@ int main(int argc, char **argv)
         return cmd_oversell(argc - optind - 1, argv + optind + 1);
     if (strcmp(argv[optind], "load") == 0)
         return cmd_load(argc - optind - 1, argv + optind + 1);
+    if (strcmp(argv[optind], "inject") == 0)
+        return cmd_inject(argc - optind - 1, argv + optind + 1);
     usage();
     return 2;
 }

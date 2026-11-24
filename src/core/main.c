@@ -56,6 +56,7 @@
  *   usage: of-core [-c conf/orderforge.conf] [-m naive|db-lock|lockfree-shm]
  */
 #include "common/config.h"
+#include "common/harden.h"
 #include "common/log.h"
 #include "common/paymsg.h"
 #include "common/proto.h"
@@ -127,6 +128,7 @@ static _Atomic int64_t job_timeout_us, slow_us; /* reloadable on SIGHUP */
 static const char   *conf_path_g;
 static wal_t        *wal;
 static _Atomic uint64_t next_txid;
+static _Atomic bool pay_stopping; /* also the background threads' stop flag */
 static int           nworkers;
 
 /* Payments. */
@@ -135,7 +137,6 @@ static mqd_t         mq_req = (mqd_t)-1, mq_rep = (mqd_t)-1;
 static uint8_t       pay_key[PAY_KEY_LEN];
 static int           bg_stop_fd = -1;
 static int64_t       reaper_interval_ms;
-static _Atomic bool  pay_stopping;
 
 /* Completion list: workers append, the reactor drains. */
 static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -242,6 +243,64 @@ static void *pay_sender_main(void *arg)
     return NULL;
 }
 
+/*
+ * MySQL connection health, shared by every thread that owns a connection. A connection
+ * that died while MySQL was down is only noticed when it is next used; so the first
+ * thread to notice bumps db_epoch, and every other thread reconnects before its next
+ * job instead of failing one request (or, worse, losing a payment reply) first.
+ */
+static _Atomic uint64_t db_epoch;
+
+static void db_note_failure(const store_t *st)
+{
+    if (db_broken(st->db))
+        atomic_fetch_add(&db_epoch, 1);
+}
+
+static void db_health(store_t *st, uint64_t *seen, int64_t *next_try, const char *who)
+{
+    uint64_t e = atomic_load(&db_epoch);
+    if (!db_broken(st->db) && e == *seen)
+        return;
+    int64_t now = of_now_us();
+    if (now < *next_try)
+        return;
+    *next_try = now + 200000; /* at most 5 attempts a second */
+    char err[256];
+    if (store_reconnect(st, err, sizeof err) == 0) {
+        *seen = e;
+        LOG_INFO("db_reconnect", "%s reconnected to MySQL", who);
+    } else {
+        LOG_WARN("db_reconnect", "%s: %s", who, err);
+    }
+}
+
+/*
+ * Background threads (payment-reply workers, reaper) must not die because MySQL was
+ * unreachable at the moment they started: that left a core running with no reaper and
+ * no one applying payments (found by the failure tests under ThreadSanitizer, where
+ * start-up is slow enough for a MySQL restart to land in the window). They retry once a
+ * second until they connect or the core is shutting down.
+ */
+
+static int store_init_retry(store_t *st, const char *who)
+{
+    char err[256];
+    for (int attempt = 0;; attempt++) {
+        if (store_init(st, &cfg, &stock, stock_mode, err, sizeof err) == 0) {
+            if (attempt)
+                LOG_INFO("db_reconnect", "%s connected to MySQL after %d retries", who, attempt);
+            return 0;
+        }
+        if (attempt == 0)
+            LOG_WARN("db_reconnect", "%s: %s; retrying every second", who, err);
+        if (atomic_load(&pay_stopping))
+            return -1;
+        struct timespec ts = {1, 0};
+        nanosleep(&ts, NULL);
+    }
+}
+
 /* Replay protection is shared by every reply worker. */
 static pay_replay_t    replay_guard;
 static pthread_mutex_t replay_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -264,9 +323,22 @@ static void handle_reply(store_t *store, const pay_msg_t *m)
         LOG_WARN("payment_rejected", "replayed or stale reply for %s dropped", m->idem_key);
         return;
     }
-    if (store_payment_reply(store, m) < 0)
-        LOG_ERROR("payment_apply", "could not apply reply for %s: %s", m->idem_key,
-                  db_error(store->db));
+    /* A reply has been taken off the queue: it must not be lost to a dead connection or
+     * a deadlock. The transaction rolls back on failure, so retrying is safe. */
+    static _Thread_local uint64_t seen;
+    static _Thread_local int64_t next_try;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        db_health(store, &seen, &next_try, "payment worker");
+        if (store_payment_reply(store, m) >= 0)
+            return;
+        db_note_failure(store);
+        struct timespec ts = {0, 200 * 1000000L};
+        nanosleep(&ts, NULL);
+        next_try = 0;
+    }
+    LOG_ERROR("payment_apply", "could not apply reply for %s after 50 attempts: %s; the order "
+                               "will expire and a late success will be refunded",
+              m->idem_key, db_error(store->db));
 }
 
 /*
@@ -280,18 +352,14 @@ static void *reply_worker_main(void *arg)
 {
     long id = (long)arg;
     store_t store;
-    char err[256];
-    if (store_init(&store, &cfg, &stock, stock_mode, err, sizeof err) != 0) {
-        LOG_ERROR("payment_worker", "%ld: %s", id, err);
+    if (store_init_retry(&store, "payment worker") != 0)
         return NULL;
-    }
     mqd_t q = mq_open(rep_queue_name, O_RDONLY | O_CLOEXEC);
     if (q == (mqd_t)-1) {
         LOG_ERROR("payment_worker", "%ld: mq_open %s: %s", id, rep_queue_name, strerror(errno));
         store_close(&store);
         return NULL;
     }
-    int64_t next_reconnect = 0;
     while (!atomic_load(&replies_stopping)) {
         /* A timed receive, so the thread notices shutdown within half a second. */
         struct timespec until;
@@ -305,11 +373,6 @@ static void *reply_worker_main(void *arg)
         ssize_t got = mq_timedreceive(q, (char *)&m, sizeof m, NULL, &until);
         if (got < 0)
             continue; /* ETIMEDOUT or EINTR */
-        if (db_broken(store.db) && of_now_us() >= next_reconnect) {
-            next_reconnect = of_now_us() + 1000000;
-            if (store_reconnect(&store, err, sizeof err) != 0)
-                LOG_WARN("db_reconnect", "payment worker %ld: %s", id, err);
-        }
         if ((size_t)got == sizeof m)
             handle_reply(&store, &m);
         else
@@ -326,11 +389,8 @@ static void *background_main(void *arg)
 {
     (void)arg;
     store_t store;
-    char err[256];
-    if (store_init(&store, &cfg, &stock, stock_mode, err, sizeof err) != 0) {
-        LOG_ERROR("reaper", "%s", err);
+    if (store_init_retry(&store, "reaper") != 0)
         return NULL;
-    }
 
     int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     struct itimerspec its = {
@@ -350,17 +410,14 @@ static void *background_main(void *arg)
     LOG_INFO("reaper", "expiry reaper running every %lld ms; %d payment-reply workers",
              (long long)reaper_interval_ms, nreply_workers);
 
-    int64_t next_reconnect = 0;
+    uint64_t seen = 0;
+    int64_t next_try = 0;
     for (bool running = true; running;) {
         struct epoll_event evs[2];
         int n = epoll_wait(ep, evs, 2, -1);
         if (n < 0 && errno == EINTR)
             continue;
-        if (db_broken(store.db) && of_now_us() >= next_reconnect) {
-            next_reconnect = of_now_us() + 1000000;
-            if (store_reconnect(&store, err, sizeof err) != 0)
-                LOG_WARN("db_reconnect", "reaper: %s", err);
-        }
+        db_health(&store, &seen, &next_try, "reaper");
         for (int i = 0; i < n; i++) {
             if (evs[i].data.u32 == 2) {
                 uint64_t ticks;
@@ -369,8 +426,10 @@ static void *background_main(void *arg)
                 int expired;
                 while ((expired = store_expire_reservations(&store, 100)) == 100)
                     ;
-                if (expired < 0)
+                if (expired < 0) {
                     LOG_WARN("reaper", "expiry pass failed: %s", db_error(store.db));
+                    db_note_failure(&store);
+                }
             } else {
                 running = false;
             }
@@ -469,21 +528,16 @@ static void *worker_main(void *arg)
     }
 
     int64_t next_reconnect = 0;
+    uint64_t db_seen = 0;
     job_t *j;
     while ((j = queue_pop(&jobs)) != NULL) {
         atomic_store(&METRIC(queue_depth), queue_depth(&jobs));
         atomic_fetch_add(&METRIC(active_workers), 1);
         int64_t start = of_now_us();
 
-        /* A worker whose MySQL connection broke reconnects (at most once a second);
-         * meanwhile requests fail fast with 503 from the store. */
-        if (db_broken(store.db) && start >= next_reconnect) {
-            next_reconnect = start + 1000000;
-            if (store_reconnect(&store, err, sizeof err) == 0)
-                LOG_INFO("db_reconnect", "worker %ld reconnected to MySQL", id);
-            else
-                LOG_WARN("db_reconnect", "worker %ld: %s", id, err);
-        }
+        /* Reconnect first if this connection, or any other thread's, was found dead;
+         * while MySQL is down requests fail fast with 503 from the store. */
+        db_health(&store, &db_seen, &next_reconnect, "worker");
 
         if (start - j->enq_us > job_timeout_us) {
             encode_error(&j->out, j->request_id, 503, "timeout",
@@ -498,6 +552,7 @@ static void *worker_main(void *arg)
             of_resp_free(&resp);
         }
 
+        db_note_failure(&store);
         int64_t end = of_now_us(), took = end - start;
         record_latency(end - j->enq_us);
         if (took > slow_us)
@@ -1064,6 +1119,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "of-core: %s\n", err);
         return 1;
     }
+    /* Before opening any file: leave root if started as root, then harden. */
+    if (of_drop_privileges(&cfg, "of-core", err, sizeof err) < 0) {
+        fprintf(stderr, "of-core: %s\n", err);
+        return 1;
+    }
+    of_harden(conf_path, &cfg, "of-core");
     if (of_log_open_config(&cfg, "of-core") != 0)
         return 1;
 

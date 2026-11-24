@@ -12,6 +12,12 @@ db.name     = orderforge
 
 # ---- runtime files: pid files (flock-locked), supervisor status, by default the socket
 run.dir = run
+# If a daemon is started as root it switches to this account before opening any file
+# (and refuses to run as root when this is unset). Ignored when not started as root.
+# run.user = orderforge
+# Core dumps are disabled (they would contain the secrets below). 1 keeps them, for
+# debugging only.
+run.core_dumps = 0
 
 # ---- logging: one JSON-lines file per process in log.dir ("-" logs to stderr)
 log.dir   = run/log
@@ -50,6 +56,17 @@ api.listen  = 127.0.0.1:9000
 api.workers = 16
 # Give up on of-core after this long and answer 502.
 api.core_timeout_s = 30
+# Rate limits (token buckets in shared memory, shared by all of-api workers).
+# Over a limit: 429 with Retry-After. api.rate_limit = 0 turns them off.
+api.rate_limit         = 1
+api.rate_ip_per_s      = 500
+api.rate_ip_burst      = 2000
+api.rate_session_per_s = 20
+api.rate_session_burst = 40
+# Login and registration, per client IP: slows password guessing across accounts.
+api.rate_auth_per_min  = 30
+api.rate_auth_burst    = 30
+api.rate_shm_name      = /orderforge-rl
 
 # ---- stock protection: naive | db-lock | lockfree-shm   (of-core -m overrides it)
 #   naive         unsafe read-modify-write: the benchmark baseline, oversells under load

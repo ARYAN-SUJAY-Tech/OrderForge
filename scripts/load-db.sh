@@ -49,7 +49,7 @@ echo "$ADMIN_PASSWORD" | "$BIN/of-ctl" -c "$CONF" useradd --admin admin@orderfor
 echo "$DEMO_PASSWORD"  | "$BIN/of-ctl" -c "$CONF" useradd alice@example.com "Alice Sharma"
 echo "$DEMO_PASSWORD"  | "$BIN/of-ctl" -c "$CONF" useradd bob@example.com "Bob Fernandes"
 
-"$BIN/of-ctl" -c "$CONF" invariants | tail -1
+"$BIN/of-ctl" -c "$CONF" invariants | grep -E "balance|FAIL" || true
 echo
 echo "admin login:     admin@orderforge.local / $ADMIN_PASSWORD"
 echo "customer logins: alice@example.com, bob@example.com / $DEMO_PASSWORD"

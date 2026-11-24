@@ -15,9 +15,9 @@ Apache.
 | 1 | Baseline store: schema, auth, catalogue, cart, naive checkout, storefront and admin UI | done (gate 1) |
 | 2 | Core engine: of-core, binary protocol, lock-free CAS reservation, three stock modes, of-bench | done (gate 2) |
 | 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | done (gate 3) |
-| 4 | Write-ahead log, crash recovery, of-supervisor, metrics endpoint, of-ctl status, chaos test | **done** (gate 4) |
-| 5 | Hardening | next |
-| 6 | Benchmarks and chaos tests | |
+| 4 | Write-ahead log, crash recovery, of-supervisor, metrics endpoint, of-ctl status, chaos test | done (gate 4) |
+| 5 | Hardening: rate limits, CSRF/Origin, privilege drop, failure injection, sanitizers, Valgrind | **done** |
+| 6 | Benchmarks and chaos tests | next |
 | 7 | Documentation, video, slides | |
 
 ## Quick start
@@ -137,11 +137,25 @@ KILLS=3 DURATION=40 scripts/chaos.sh
 No checkout was lost or duplicated. A checkout that committed just before the crash is
 answered "already placed" when the client retries it with the same key.
 
+## Hardening (phase 5)
+
+```sh
+tests/run-all.sh asan        # every suite against the whole stack under AddressSanitizer
+tests/integration/security_test.sh   # 29 checks: CSRF, Origin, limits, injection, forged payments
+tests/integration/failure_test.sh    # 24 checks: MySQL down, gateway hung/killed, queue full
+make valgrind                # unit tests under Valgrind memcheck
+```
+
+The security review in [docs/security-review.md](docs/security-review.md) covers every
+endpoint and process boundary, and lists six findings fixed in this phase. One example:
+login could be forged from another site with a `text/plain` HTML form.
+
 ## Documentation
 
 - [docs/install.md](docs/install.md): installation guide
 - [docs/design.md](docs/design.md): design document (updated every phase)
 - [docs/api.md](docs/api.md): API reference
+- [docs/security-review.md](docs/security-review.md): security review, endpoint by endpoint
 - [docs/user-manual.md](docs/user-manual.md): customer and admin guide
 
 ## Build modes

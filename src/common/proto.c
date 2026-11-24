@@ -14,6 +14,7 @@ const char *of_status_text(int status)
     case 405: return "Method Not Allowed";
     case 409: return "Conflict";
     case 413: return "Payload Too Large";
+    case 415: return "Unsupported Media Type";
     case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
     case 502: return "Bad Gateway";

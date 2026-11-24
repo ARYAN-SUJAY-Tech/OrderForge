@@ -13,6 +13,8 @@ run/
 # secrets: only the .example is committed
 conf/orderforge.conf
 conf/test.conf
+conf/failure.conf
+conf/run-all.conf
 
 # benchmark raw output (charts and summaries are committed under docs/)
 bench-results/

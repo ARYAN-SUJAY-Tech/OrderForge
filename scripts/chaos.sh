@@ -20,7 +20,7 @@ URL=${URL:-http://127.0.0.1:8080}
 CLIENTS=${CLIENTS:-50}
 DURATION=${DURATION:-30}
 KILLS=${KILLS:-1}
-TARGET_MS=5000
+TARGET_MS=${TARGET_MS:-5000}  # raise it for sanitizer builds, which are 5-15x slower
 
 get() { sed -n "s/^$1 *= *\"\{0,1\}\([^\"]*\)\"\{0,1\} *$/\1/p" "$CONF" | tail -1; }
 RUN_DIR=$(get run.dir); RUN_DIR=${RUN_DIR:-run}

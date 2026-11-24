@@ -167,7 +167,29 @@ the load run's results, the recovery counters and every invariant. A copy is sav
 under `bench-results/`. The test adds orders to the store; reset afterwards with
 `scripts/load-db.sh`.
 
-## 9. The oversell experiment (gate 2)
+## 9. Security and failure tests (phase 5)
+
+```sh
+tests/integration/security_test.sh       # with the stack running; run it last (it uses up the login limit)
+```
+
+The failure suite starts its own stack, so stop yours first. It stops and starts MySQL,
+so it asks for sudo:
+
+```sh
+build/debug/of-ctl stop
+tests/integration/failure_test.sh
+```
+
+Everything at once, against one build mode (this resets the database):
+
+```sh
+tests/run-all.sh asan                 # also: debug, ubsan, tsan
+make valgrind                         # unit tests under Valgrind
+sudo tests/integration/privdrop_test.sh   # optional: proves the root privilege drop
+```
+
+## 10. The oversell experiment (gate 2)
 
 Stop `run.sh`, then start `of-api` on its own. The experiment starts and stops `of-core`
 itself, once per mode.
@@ -190,6 +212,11 @@ To run one mode by hand while `run.sh` is running:
 
 | Symptom | Cause and fix |
 |---|---|
+| 429 "too many requests" while testing | A rate limit; it refills within a minute. For heavy local testing raise `api.rate_*` in the config, or set `api.rate_limit = 0` |
+| 415 "request bodies must be application/json" | A client sent a body without `Content-Type: application/json` |
+| 403 `cross_origin` | The request's `Origin` header names another site; open the shop at the same host and port Apache serves |
+| A daemon prints "config ... readable by every user" | `chmod 600 conf/orderforge.conf` |
+| A daemon says it "refuses to run as root" | Start it as your normal user, or set `run.user` |
 | `make` says libraries are missing | Run `sudo ./scripts/install-deps.sh`, then `make deps` |
 | `/api/...` returns 503 from Apache (HTML page) | of-api is not running or is not listening on `api.listen` (default 127.0.0.1:9000) |
 | `/api/...` returns 503 `core_unavailable` | of-core is not running; start it (or use `scripts/run.sh`) |

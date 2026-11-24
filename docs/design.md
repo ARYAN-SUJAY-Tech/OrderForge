@@ -565,6 +565,25 @@ Phase 3 adds:
 - **Audit:** every cancellation, refund, status change and automatic refund is written
   to `audit_log`.
 
+Phase 5 adds (full review: [security-review.md](security-review.md)):
+
+- **Rate limits:** token buckets in shared memory, shared by every of-api worker
+  process. Each bucket's state is one 64-bit word: 40 bits of refill time and 24 bits
+  of thousandths of a token. Taking a token is one compare-and-swap, so no locks are
+  needed across processes. Separate rules per IP, per session, and for login and
+  registration.
+- **Cross-site requests:** bodies must be `application/json`, which closes login CSRF
+  through `text/plain` forms. A state-changing request with a foreign `Origin` is
+  refused.
+- **Process hardening:**
+  - core dumps off (`RLIMIT_CORE = 0`, `PR_SET_DUMPABLE = 0`);
+  - `umask 027`;
+  - a warning when the config file is readable by others;
+  - started as root, every daemon drops to `run.user`, or refuses to run.
+- **Payment replies survive a MySQL outage:** they are retried until applied, and a
+  shared "database epoch" makes every thread reconnect after any one of them sees a
+  dead connection.
+
 Phase 4 adds:
 
 - **Single instance:** every daemon holds a flock pid file, so a second copy refuses to
@@ -662,14 +681,61 @@ Idempotency-Key.
 - **Under AddressSanitizer:** both 56-check suites passed, chaos passed, and there
   were no memory errors and no leaks at shutdown.
 
+### Phase 5: hardening
+
+`tests/run-all.sh MODE` runs every suite against the whole stack built in one mode:
+unit, API, payments, the 1,000-buyer rush, a `kill -9` chaos run, security and failure
+injection. It fails if any daemon or tool writes a sanitizer report.
+
+| Mode | unit | api | payments | oversell | chaos | security | failure | Sanitizer reports |
+|---|---|---|---|---|---|---|---|---|
+| asan (+ LeakSanitizer) | pass | 56/56 | 56/56 | 50 of 50 | pass | 29/29 | 24/24 | none |
+| ubsan | pass | 56/56 | 56/56 | 50 of 50 | pass | 29/29 | 24/24 | none |
+| tsan (whole stack, `setarch -R`) | pass | 56/56 | 56/56 | 50 of 50 | pass | 29/29 | 24/24 | none |
+
+**Failure injection** (`tests/integration/failure_test.sh`, 24 checks):
+
+| Failure | Result |
+|---|---|
+| MySQL stopped | Requests answered 503 in about 25 ms (no hang); metrics and `of-ctl status` kept working; no daemon crashed. When MySQL returned, service resumed about 2 s after its start command, sessions were still valid, and orders flowed again. |
+| Gateway frozen (SIGSTOP) | 12 checkouts accepted. 10 waited in the kernel queue and 2 in the outbox; all 12 were paid on resume. |
+| Gateway killed with requests queued | The supervisor restarted it, and the new of-pay answered the queued requests (all paid). |
+| Gateway gone longer than the TTL | Orders cancelled and their stock returned; the late approvals were refunded automatically. |
+| Job queue full (2 workers, 4 slots) | 394 requests shed with 503 "busy"; nothing oversold; of-core did not crash. |
+| An of-api worker and of-report killed | The API served 20 out of 20 requests meanwhile; of-report was restarted. |
+
+The first run of this suite found finding F3: a payment reply lost after a MySQL outage.
+Running it under ThreadSanitizer found F7: of-core starts slowly under TSan, so the MySQL
+stop landed while it was starting. The payment-reply workers and the reaper could not
+connect, logged the error and exited for good, leaving a core that served requests but
+never applied a payment or expired an order. These threads now retry the connection
+every second until they succeed or the core shuts down.
+
+**Security suite** (`tests/integration/security_test.sh`, 29 checks): headers; login
+CSRF through `text/plain` and form-encoded bodies (415); foreign and `null` Origin
+(403); missing CSRF token; size limits; SQL injection in search and in ids; duplicate
+and nested JSON; admin access; forged, stale and replayed payment messages injected
+straight into the reply queue (`of-bench inject`), where only the genuine signed one
+took effect; and both rate limits.
+
+**Valgrind:** `make valgrind` runs every unit test under memcheck, following forked
+children, and fails on any memory error or definite leak. Result: all 12 programs clean.
+It found one problem in a test: the queue test's producers spun on a full queue, which
+nearly livelocks under Valgrind (it runs one thread at a time); they now yield.
+
 ## 12. Testing
 
 | Layer | What runs | Result |
 |---|---|---|
-| Unit | `make test`: 11 programs covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm), **order state machine** (all 64 edges, actors, final states), **payment messages** (every-byte tampering, forgery, wrong key, replay window and nonce ring), and **WAL** (encoding, every-byte corruption, torn tail truncated, group commit with 8 threads, compaction keeping exactly the in-flight reservations) | Passes in debug, asan, ubsan, tsan and release |
+| Unit | `make test`: 12 programs (phase 5 adds the **rate limiter**: burst, refill, fail-open, exactness across 8 threads and 6 processes) covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm), **order state machine** (all 64 edges, actors, final states), **payment messages** (every-byte tampering, forgery, wrong key, replay window and nonce ring), and **WAL** (encoding, every-byte corruption, torn tail truncated, group commit with 8 threads, compaction keeping exactly the in-flight reservations) | Passes in debug, asan, ubsan, tsan and release |
 | Integration | `tests/integration/api_test.sh`: 56 checks through Apache → of-api → of-core | 56/56 |
 | Payments and orders | `tests/integration/payment_test.sh` with `conf/test.conf` (4 s TTL): 56 checks | 56/56 |
 | Concurrency | `of-bench oversell` / `scripts/oversell-experiment.sh` | Gate 2 table above |
 | Lifecycle | Restart of-core under a running of-api; SIGTERM drain; core down gives 503 | of-api reconnects by itself; clean drain; shared memory and socket removed |
 | Chaos | `scripts/chaos.sh`: `kill -9` of-core under `of-bench load`, then every invariant | Gate 4 table above |
 | Supervision | Crash-loop of-pay six times; `of-ctl reload`; `of-ctl stop` | Degraded after the sixth crash, revived by reload, ordered drain on stop |
+| Security | `tests/integration/security_test.sh` | 29/29 |
+| Failure injection | `tests/integration/failure_test.sh` | 24/24 |
+| Privilege drop | `sudo tests/integration/privdrop_test.sh` | Needs root; run it yourself |
+| Everything per build mode | `tests/run-all.sh asan\|ubsan\|tsan` | Phase 5 table above |
+| Memory (Valgrind) | `make valgrind` | Unit tests under memcheck |

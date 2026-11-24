@@ -18,6 +18,7 @@
  */
 #include "common/buf.h"
 #include "common/config.h"
+#include "common/harden.h"
 #include "common/log.h"
 #include "common/stock.h"
 #include "common/util.h"
@@ -290,6 +291,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "of-report: %s\n", err);
         return 1;
     }
+    /* Before opening any file: leave root if started as root, then harden. */
+    if (of_drop_privileges(&cfg, "of-report", err, sizeof err) < 0) {
+        fprintf(stderr, "of-report: %s\n", err);
+        return 1;
+    }
+    of_harden(conf_path, &cfg, "of-report");
     if (of_log_open_config(&cfg, "of-report") != 0)
         return 1;
 

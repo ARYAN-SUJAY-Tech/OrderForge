@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Oversell demonstration for the phase-1 naive checkout.
+# Quick oversell demonstration through the web API (curl only).
+# It only oversells when of-core runs the unsafe baseline:  MODE=naive scripts/run.sh
+# The full experiment (1,000 buyers, all three stock modes, latency, CSV) is
+# scripts/oversell-experiment.sh, built on of-bench.
 #
 # Sets the hot SKU (product 1, HOT-001) to STOCK units, gives BUYERS customers one unit
 # each in their cart, then fires every checkout at the same moment. With a correct
@@ -8,8 +11,7 @@
 #
 #   BASE=http://localhost:8080 STOCK=10 BUYERS=40 tests/integration/naive_oversell.sh
 #
-# This is a quick demo; the real experiment (1,000 buyers, three stock modes) is
-# of-bench in phase 2. Reload the database afterwards: scripts/load-db.sh
+# Reload the database afterwards: scripts/load-db.sh
 set -uo pipefail
 
 BASE=${BASE:-http://localhost:8080}
@@ -73,6 +75,6 @@ echo "stock_on_hand after: $LEFT"
 if [[ $OK -gt $STOCK ]]; then
     echo "OVERSOLD by $((OK - STOCK)) units: the naive read-modify-write lost updates"
 else
-    echo "no oversell this run (try more BUYERS, or store.naive_delay_us = 2000)"
+    echo "no oversell this run (is of-core in naive mode? MODE=naive scripts/run.sh)"
 fi
 echo "now run: ./build/debug/of-ctl invariants"

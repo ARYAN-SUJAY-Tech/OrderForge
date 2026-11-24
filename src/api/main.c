@@ -1,11 +1,17 @@
 /*
  * of-api - pre-forked FastCGI front end.
  *
+ * of-api holds no business logic and no database connection. Each worker turns one
+ * FastCGI request into one binary frame, sends it to of-core over a Unix domain socket,
+ * waits for the response frame, and turns that back into an HTTP response. All
+ * authentication, authorisation and stock logic run inside of-core, so a bug here can
+ * at worst produce a malformed request that the core rejects.
+ *
  * Process model
  *   The parent opens the FastCGI listening socket once, then fork()s N workers that all
  *   block in accept() on that same inherited socket; the kernel hands each new Apache
- *   connection to exactly one of them. Each worker owns a private MySQL connection, so
- *   workers share nothing but the socket and the O_APPEND log file.
+ *   connection to exactly one of them. Each worker keeps one persistent connection to
+ *   of-core, so many workers mean many requests in flight at the core.
  *
  *   The parent does no request work. It blocks SIGCHLD/SIGTERM/SIGINT/SIGHUP and
  *   receives them synchronously with sigtimedwait(), which avoids async-signal-safety
@@ -15,15 +21,13 @@
  *     SIGHUP   reopen the log file and forward SIGHUP to the workers
  *     SIGTERM  forward to the workers, wait up to 5 s, then SIGKILL stragglers
  *
- *   A worker whose MySQL connection breaks finishes its current request and exits with
- *   status 3; the parent's restart gives it a fresh connection.
- *
  *   usage: of-api [-c conf/orderforge.conf]
  */
+#include "common/buf.h"
 #include "common/config.h"
 #include "common/log.h"
+#include "common/proto.h"
 #include "common/util.h"
-#include "store/store.h"
 
 #include <errno.h>
 #include <fcgiapp.h>
@@ -31,17 +35,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#define MAX_WORKERS     64
+#define MAX_WORKERS     256
 #define BACKOFF_MIN_MS  100
 #define BACKOFF_MAX_MS  5000
 #define STABLE_AFTER_US 10000000  /* a worker alive this long resets its backoff */
-#define PATH_MAX_LEN    1024
-#define EXIT_DB_BROKEN  3
 #define EXIT_INIT       4
 
 typedef struct {
@@ -56,7 +60,172 @@ static int         listen_fd = -1;
 static worker_t    workers[MAX_WORKERS];
 static int         nworkers;
 
-/* ------------------------------------------------------------------ worker */
+/* ------------------------------------------------------------------ worker: core client */
+
+typedef struct {
+    int   status;
+    char  set_cookie[OF_MAX_COOKIE + 1];
+    buf_t body;
+} api_resp_t;
+
+static int      core_fd = -1;
+static char     core_path[108];
+static int      core_timeout_s;
+static uint64_t next_request_id;
+
+static void core_disconnect(void)
+{
+    if (core_fd >= 0)
+        close(core_fd);
+    core_fd = -1;
+}
+
+static int core_connect(void)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    memcpy(addr.sun_path, core_path, strlen(core_path) + 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        close(fd);
+        return -1;
+    }
+    /* A hung core must not hang Apache forever. */
+    struct timeval tv = {core_timeout_s, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    core_fd = fd;
+    return 0;
+}
+
+/* The core may have restarted since our last request: an idle connection that now
+ * reads as EOF is stale. Check without blocking before reusing it. */
+static void core_drop_if_stale(void)
+{
+    if (core_fd < 0)
+        return;
+    char c;
+    ssize_t n = recv(core_fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) || n > 0)
+        core_disconnect(); /* EOF, error, or unexpected unsolicited bytes */
+}
+
+static int write_all(int fd, const void *p, size_t len)
+{
+    const char *s = p;
+    while (len > 0) {
+        ssize_t n = send(fd, s, len, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return -1;
+        s += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static int read_all(int fd, void *p, size_t len)
+{
+    char *s = p;
+    while (len > 0) {
+        ssize_t n = read(fd, s, len);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            return -1; /* EOF, error or SO_RCVTIMEO timeout */
+        s += n;
+        len -= (size_t)n;
+    }
+    return 0;
+}
+
+static void api_error(api_resp_t *r, int status, const char *code, const char *msg)
+{
+    r->status = status;
+    buf_reset(&r->body);
+    buf_puts(&r->body, "{\"error\":{");
+    buf_json_kv_str(&r->body, "code", code);
+    buf_puts(&r->body, ",");
+    buf_json_kv_str(&r->body, "message", msg);
+    buf_puts(&r->body, "}}");
+}
+
+/* Send one request to of-core and wait for its response. Always fills r. */
+static void core_call(const of_req_t *req, api_resp_t *r)
+{
+    static buf_t frame;
+    static char *payload, *arena;
+    static size_t payload_cap;
+
+    buf_reset(&frame);
+    uint64_t rid = ++next_request_id;
+    if (proto_encode_request(&frame, rid, req) != 0) {
+        api_error(r, 413, "too_large", "request too large");
+        return;
+    }
+
+    /* Send. A send failure means the core never got the request, so one retry on a fresh
+     * connection is safe. Once it is sent we never retry: the core may have acted on it. */
+    core_drop_if_stale();
+    for (int attempt = 0;; attempt++) {
+        if (core_fd < 0 && core_connect() != 0) {
+            LOG_WARN("core_unavailable", "connect %s: %s", core_path, strerror(errno));
+            api_error(r, 503, "core_unavailable", "the store engine is not running");
+            return;
+        }
+        if (write_all(core_fd, frame.data, frame.len) == 0)
+            break;
+        core_disconnect();
+        if (attempt == 1) {
+            api_error(r, 503, "core_unavailable", "the store engine is not reachable");
+            return;
+        }
+    }
+
+    of_frame_hdr_t h;
+    if (read_all(core_fd, &h, sizeof h) != 0 || proto_check_header(&h, OF_MSG_RESPONSE) != 0 ||
+        h.request_id != rid) {
+        LOG_WARN("core_error", "no valid response header for request %llu",
+                 (unsigned long long)rid);
+        core_disconnect();
+        api_error(r, 502, "core_error", "the store engine did not answer");
+        return;
+    }
+    if (h.length > payload_cap) {
+        char *p = realloc(payload, h.length);
+        char *a = realloc(arena, (size_t)h.length + 8);
+        if (!p || !a) {
+            free(p ? p : payload);
+            free(a ? a : arena);
+            payload = arena = NULL;
+            payload_cap = 0;
+            core_disconnect();
+            api_error(r, 502, "core_error", "out of memory");
+            return;
+        }
+        payload = p;
+        arena = a;
+        payload_cap = h.length;
+    }
+    int status;
+    const char *cookie, *body;
+    size_t body_len;
+    if (read_all(core_fd, payload, h.length) != 0 ||
+        proto_decode_response(payload, h.length, &status, &cookie, &body, &body_len, arena,
+                              (size_t)h.length + 8) != 0) {
+        core_disconnect();
+        api_error(r, 502, "core_error", "malformed response from the store engine");
+        return;
+    }
+    r->status = status;
+    snprintf(r->set_cookie, sizeof r->set_cookie, "%s", cookie);
+    buf_reset(&r->body);
+    buf_append(&r->body, body, body_len);
+}
+
+/* ------------------------------------------------------------------ worker: FastCGI side */
 
 static volatile sig_atomic_t worker_hup;
 
@@ -81,10 +250,10 @@ static of_method_t parse_method(const char *m)
     return OF_METHOD_OTHER;
 }
 
-static void send_response(FCGX_Request *rq, const of_resp_t *resp)
+static void send_response(FCGX_Request *rq, const api_resp_t *resp)
 {
     /* Headers are formatted with snprintf: libfcgi's own printf does not know %zu. */
-    char head[512 + OF_COOKIE_MAX];
+    char head[512 + OF_MAX_COOKIE];
     int n = snprintf(head, sizeof head,
                      "Status: %d %s\r\n"
                      "Content-Type: application/json; charset=utf-8\r\n"
@@ -116,11 +285,11 @@ static int read_body(FCGX_Request *rq, char *buf, size_t len)
     return 0;
 }
 
-static void serve_one(store_t *store, FCGX_Request *rq, of_resp_t *resp)
+static void serve_one(FCGX_Request *rq, api_resp_t *resp)
 {
-    static char body[16384 + 1];
-    char path[PATH_MAX_LEN];
-    char session[80] = "";
+    static char body[OF_MAX_BODY + 1];
+    char path[OF_MAX_PATH + 1];
+    char session[OF_MAX_TOKEN + 1] = "";
     int64_t t0 = of_now_us();
 
     const char *method_s = FCGX_GetParam("REQUEST_METHOD", rq->envp);
@@ -141,36 +310,32 @@ static void serve_one(store_t *store, FCGX_Request *rq, of_resp_t *resp)
         .ip = ip ? ip : "",
     };
 
-    of_resp_init(resp);
     resp->status = 0;
+    resp->set_cookie[0] = '\0';
+    buf_reset(&resp->body);
 
-    /* Path: REQUEST_URI without its query string. */
+    /* Validate at the edge what the protocol caps anyway, with friendlier errors. */
     size_t plen = uri ? strcspn(uri, "?") : 0;
     if (!uri || plen == 0 || plen >= sizeof path) {
-        resp->status = 400;
-        buf_puts(&resp->body, "{\"error\":{\"code\":\"bad_request\",\"message\":\"bad path\"}}");
+        api_error(resp, 400, "bad_request", "bad path");
     } else {
         memcpy(path, uri, plen);
         path[plen] = '\0';
     }
+    if (resp->status == 0 && (strlen(req.query) > OF_MAX_QUERY || strlen(req.csrf_token) >
+                                                                      OF_MAX_TOKEN))
+        api_error(resp, 400, "bad_request", "query string or header too long");
 
     int64_t clen = 0;
     if (resp->status == 0 && clen_s && *clen_s) {
-        if (of_parse_i64(clen_s, 0, INT64_MAX, &clen) != 0) {
-            resp->status = 400;
-            buf_puts(&resp->body,
-                     "{\"error\":{\"code\":\"bad_request\",\"message\":\"bad Content-Length\"}}");
-        } else if ((size_t)clen > sizeof body - 1) {
-            resp->status = 413;
-            buf_puts(&resp->body,
-                     "{\"error\":{\"code\":\"too_large\",\"message\":\"request body too large\"}}");
-        } else if (read_body(rq, body, (size_t)clen) != 0) {
-            resp->status = 400;
-            buf_puts(&resp->body,
-                     "{\"error\":{\"code\":\"bad_request\",\"message\":\"truncated body\"}}");
-        } else {
+        if (of_parse_i64(clen_s, 0, INT64_MAX, &clen) != 0)
+            api_error(resp, 400, "bad_request", "bad Content-Length");
+        else if ((size_t)clen > sizeof body - 1)
+            api_error(resp, 413, "too_large", "request body too large");
+        else if (read_body(rq, body, (size_t)clen) != 0)
+            api_error(resp, 400, "bad_request", "truncated body");
+        else
             req.body_len = (size_t)clen;
-        }
     }
     if (req.body_len == 0)
         body[0] = '\0';
@@ -178,13 +343,12 @@ static void serve_one(store_t *store, FCGX_Request *rq, of_resp_t *resp)
     if (resp->status == 0) {
         (void)of_cookie_get(FCGX_GetParam("HTTP_COOKIE", rq->envp), "of_session", session,
                             sizeof session);
-        store_handle(store, &req, resp);
+        core_call(&req, resp);
     }
 
     send_response(rq, resp);
-    LOG_INFO("request", "%s %s %d %lldus", method_s ? method_s : "?", plen ? path : "?",
-             resp->status, (long long)(of_now_us() - t0));
-    of_resp_free(resp);
+    LOG_DEBUG("request", "%s %s %d %lldus", method_s ? method_s : "?", plen ? path : "?",
+              resp->status, (long long)(of_now_us() - t0));
 }
 
 static void worker_main(void)
@@ -203,37 +367,28 @@ static void worker_main(void)
     sa.sa_flags = SA_RESTART; /* accept() resumes instead of failing with EINTR */
     sigaction(SIGHUP, &sa, NULL);
 
-    static store_t store;
-    char err[256];
-    if (store_init(&store, &cfg, err, sizeof err) != 0) {
-        LOG_ERROR("worker_init", "%s", err);
-        _exit(EXIT_INIT);
-    }
-    LOG_INFO("worker_ready", "worker accepting requests");
+    /* Connect lazily: the core may start after us; a missing core just means 503s. */
+    if (core_connect() != 0)
+        LOG_WARN("core_unavailable", "of-core not reachable at %s yet", core_path);
 
     FCGX_Request rq;
     if (FCGX_InitRequest(&rq, listen_fd, 0) != 0) {
         LOG_ERROR("worker_init", "FCGX_InitRequest failed");
         _exit(EXIT_INIT);
     }
+    LOG_DEBUG("worker_ready", "worker accepting requests");
 
-    of_resp_t resp;
+    api_resp_t resp;
+    buf_init(&resp.body);
     while (FCGX_Accept_r(&rq) >= 0) {
-        serve_one(&store, &rq, &resp);
+        serve_one(&rq, &resp);
         FCGX_Finish_r(&rq);
-
         if (worker_hup) {
             worker_hup = 0;
             of_log_reopen();
         }
-        if (db_broken(store.db)) {
-            LOG_WARN("worker_exit", "database connection lost, exiting for a fresh one");
-            store_close(&store);
-            _exit(EXIT_DB_BROKEN);
-        }
     }
     LOG_ERROR("worker_exit", "FCGX_Accept_r failed");
-    store_close(&store);
     _exit(1);
 }
 
@@ -323,28 +478,6 @@ static void shutdown_workers(void)
     }
 }
 
-static int open_log(const char *proc)
-{
-    const char *dir = of_config_get(&cfg, "log.dir", "run/log");
-    int lvl = of_log_level_parse(of_config_get(&cfg, "log.level", "info"));
-    if (lvl < 0)
-        lvl = OF_LOG_INFO;
-    if (strcmp(dir, "-") == 0)
-        return of_log_open(NULL, proc, (of_log_level_t)lvl);
-
-    char path[512];
-    if (of_mkdir_p(dir, 0750) != 0) {
-        fprintf(stderr, "of-api: mkdir %s: %s\n", dir, strerror(errno));
-        return -1;
-    }
-    snprintf(path, sizeof path, "%s/%s.log", dir, proc);
-    if (of_log_open(path, proc, (of_log_level_t)lvl) != 0) {
-        fprintf(stderr, "of-api: open %s: %s\n", path, strerror(errno));
-        return -1;
-    }
-    return 0;
-}
-
 static void usage(void)
 {
     fprintf(stderr, "usage: of-api [-c config]\n");
@@ -367,15 +500,22 @@ int main(int argc, char **argv)
         fprintf(stderr, "of-api: %s\n", err);
         return 1;
     }
-    if (open_log("of-api") != 0)
+    if (of_log_open_config(&cfg, "of-api") != 0)
         return 1;
 
-    int ok;
-    nworkers = (int)of_config_get_long(&cfg, "api.workers", 4, 1, MAX_WORKERS, &ok);
-    if (!ok) {
-        LOG_ERROR("config", "api.workers must be 1..%d", MAX_WORKERS);
+    int ok, ok2;
+    nworkers = (int)of_config_get_long(&cfg, "api.workers", 16, 1, MAX_WORKERS, &ok);
+    core_timeout_s = (int)of_config_get_long(&cfg, "api.core_timeout_s", 30, 1, 600, &ok2);
+    if (!ok || !ok2) {
+        LOG_ERROR("config", "api.workers must be 1..%d, api.core_timeout_s 1..600", MAX_WORKERS);
         return 1;
     }
+    const char *cpath = of_config_get(&cfg, "core.socket", "run/of-core.sock");
+    if (strlen(cpath) >= sizeof core_path) {
+        LOG_ERROR("config", "core.socket path too long");
+        return 1;
+    }
+    snprintf(core_path, sizeof core_path, "%s", cpath);
     const char *bind = of_config_get(&cfg, "api.listen", "127.0.0.1:9000");
 
     if (FCGX_Init() != 0) {

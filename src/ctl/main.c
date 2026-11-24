@@ -108,57 +108,44 @@ static int cmd_useradd(int argc, char **argv)
     return 0;
 }
 
+/*
+ * Ledger check in MySQL, plus (when of-core runs in lockfree-shm mode) a comparison of
+ * the live shared-memory counters with MySQL. The table is mapped read-only: of-ctl can
+ * look but can never change stock.
+ */
 static int cmd_invariants(void)
 {
     db_t *db = connect_db();
     if (!db)
         return 1;
 
-    db_res_t r;
-    if (db_query(db, &r,
-                 "SELECT p.id, p.sku, i.stock_on_hand, "
-                 "  COALESCE((SELECT SUM(delta) FROM stock_movements m "
-                 "            WHERE m.product_id = p.id), 0) AS ledger, "
-                 "  COALESCE((SELECT SUM(oi.qty) FROM order_items oi "
-                 "            JOIN orders o ON o.id = oi.order_id "
-                 "            WHERE oi.product_id = p.id "
-                 "              AND o.status NOT IN ('cancelled', 'refunded')), 0) AS sold "
-                 "FROM products p JOIN inventory i ON i.product_id = p.id ORDER BY p.id",
-                 "") != 0) {
+    stock_table_t t;
+    const stock_table_t *tp = NULL;
+    const char *shm_name = of_config_get(&cfg, "core.shm_name", "/orderforge");
+    if (stock_attach(&t, shm_name) == 0) {
+        if (t.shm->stock_mode == STOCK_LOCKFREE && atomic_load(&t.shm->started_unix) != 0)
+            tp = &t;
+        printf("of-core shared memory: mode %s, %llu products%s\n",
+               stock_mode_name((stock_mode_t)t.shm->stock_mode),
+               (unsigned long long)atomic_load(&t.shm->count),
+               tp ? " (compared with MySQL)" : " (not compared: only lockfree-shm keeps it exact)");
+    } else {
+        printf("of-core shared memory: not found (core not running), checking MySQL only\n");
+    }
+
+    buf_t out;
+    buf_init(&out);
+    int64_t oversold = 0;
+    int bad = store_check_invariants(db, tp, &out, &oversold);
+    if (out.data)
+        fputs(out.data, stdout);
+    buf_free(&out);
+    if (tp || t.shm)
+        stock_close(&t, false);
+    if (bad < 0)
         fprintf(stderr, "of-ctl: %s\n", db_error(db));
-        db_close(db);
-        return 1;
-    }
-
-    int products = 0, bad = 0;
-    int64_t oversold_total = 0;
-    printf("%-10s %8s %8s %8s  %s\n", "sku", "on_hand", "ledger", "sold", "result");
-    while (db_fetch(&r) == 1) {
-        products++;
-        int64_t on_hand = db_int(&r, 2), ledger = db_int(&r, 3), sold = db_int(&r, 4);
-        bool ok = on_hand >= 0 && ledger == on_hand;
-        if (!ok) {
-            bad++;
-            /* The ledger is the truth about how many units left the shelf. A negative
-             * ledger means more units were sold than ever existed. */
-            if (ledger < 0)
-                oversold_total += -ledger;
-            printf("%-10s %8lld %8lld %8lld  MISMATCH%s\n", db_str(&r, 1), (long long)on_hand,
-                   (long long)ledger, (long long)sold,
-                   ledger < 0 ? " (oversold)" : "");
-        }
-    }
-    db_res_free(&r);
     db_close(db);
-
-    if (bad == 0) {
-        printf("all %d products balance: stock_on_hand == SUM(stock_movements), none negative\n",
-               products);
-        return 0;
-    }
-    printf("%d of %d products FAIL the invariant; %lld units oversold\n", bad, products,
-           (long long)oversold_total);
-    return 1;
+    return bad == 0 ? 0 : 1;
 }
 
 int main(int argc, char **argv)

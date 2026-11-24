@@ -73,10 +73,14 @@ API_SRC := $(wildcard src/api/*.c)
 API_OBJ := $(API_SRC:%.c=$(BUILD)/%.o)
 CTL_SRC := $(wildcard src/ctl/*.c)
 CTL_OBJ := $(CTL_SRC:%.c=$(BUILD)/%.o)
-$(API_OBJ): CFLAGS += $(FCGI_CFLAGS) $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
-$(CTL_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+CORE_SRC := $(wildcard src/core/*.c)
+CORE_OBJ := $(CORE_SRC:%.c=$(BUILD)/%.o)
+BENCH_SRC := $(wildcard src/bench/*.c)
+BENCH_OBJ := $(BENCH_SRC:%.c=$(BUILD)/%.o)
+$(API_OBJ): CFLAGS += $(FCGI_CFLAGS)
+$(CTL_OBJ) $(CORE_OBJ) $(BENCH_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
 
-BINS := $(BUILD)/of-api $(BUILD)/of-ctl
+BINS := $(BUILD)/of-core $(BUILD)/of-api $(BUILD)/of-ctl $(BUILD)/of-bench
 
 # ---------------------------------------------------------------- tests
 TEST_SRC := $(wildcard tests/unit/test_*.c)
@@ -115,8 +119,15 @@ $(LIBSTORE): $(STORE_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-$(BUILD)/of-api: $(API_OBJ) $(LIBSTORE) $(LIBCOMMON)
-	$(CC) $(API_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(FCGI_LIBS) $(LDLIBS)
+# of-api deliberately links no database or crypto library: it only frames requests.
+$(BUILD)/of-api: $(API_OBJ) $(LIBCOMMON)
+	$(CC) $(API_OBJ) -o $@ $(LDFLAGS) $(LIBCOMMON) $(FCGI_LIBS) $(LDLIBS)
+
+$(BUILD)/of-core: $(CORE_OBJ) $(LIBSTORE) $(LIBCOMMON)
+	$(CC) $(CORE_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
+
+$(BUILD)/of-bench: $(BENCH_OBJ) $(LIBSTORE) $(LIBCOMMON)
+	$(CC) $(BENCH_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
 
 $(BUILD)/of-ctl: $(CTL_OBJ) $(LIBSTORE) $(LIBCOMMON)
 	$(CC) $(CTL_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
@@ -163,4 +174,5 @@ deps:
 clean:
 	rm -rf build
 
--include $(COMMON_OBJ:.o=.d) $(STORE_OBJ:.o=.d) $(API_OBJ:.o=.d) $(CTL_OBJ:.o=.d)
+-include $(COMMON_OBJ:.o=.d) $(STORE_OBJ:.o=.d) $(API_OBJ:.o=.d) $(CTL_OBJ:.o=.d) \
+         $(CORE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d)

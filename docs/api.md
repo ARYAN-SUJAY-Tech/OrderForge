@@ -24,7 +24,8 @@ Errors use one shape:
 | 409 | Conflict: duplicate, out of stock, or busy |
 | 413 | Body too large |
 | 429 | Account locked |
-| 503 | Database unavailable |
+| 502 | of-core did not answer in time, or sent a malformed reply |
+| 503 | Database or engine unavailable (`db_unavailable`, `core_unavailable`), overloaded (`busy`, `timeout`), or restarting (`shutting_down`) |
 
 ## Auth
 
@@ -87,6 +88,7 @@ see every order.
 | DELETE | `/api/admin/products/{id}` | – | soft delete: `active=false`, removed from carts |
 | POST | `/api/admin/products/{id}/stock` | `{delta, reason: "restock" or "adjust"}` | `{product}`; 409 if stock would go below 0 |
 | GET | `/api/admin/orders` | `status`, `page`, `per_page` | `{orders, page, total}` |
+| GET | `/api/admin/system` | – | `{stock_mode, products_in_shm, started_unix, metrics: {requests_total, busy_rejects, queue_depth, orders_total, orders_failed, cas_retries, active_workers}}` |
 
 Every admin change is recorded in `audit_log`. Every stock change is recorded in
 `stock_movements`.

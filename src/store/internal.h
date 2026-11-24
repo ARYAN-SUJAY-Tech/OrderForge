@@ -97,5 +97,14 @@ void h_admin_product_update(ctx_t *c);
 void h_admin_product_delete(ctx_t *c);
 void h_admin_stock(ctx_t *c);
 void h_admin_orders(ctx_t *c);
+void h_admin_system(ctx_t *c);
+
+/* Shared-memory metrics helper: no-op when the store has no stock table. */
+#define STORE_METRIC_ADD(s, field, n)                                                    \
+    do {                                                                                 \
+        if ((s)->stock && (s)->stock->shm)                                               \
+            atomic_fetch_add_explicit(&(s)->stock->shm->metrics.field, (n),              \
+                                      memory_order_relaxed);                             \
+    } while (0)
 
 #endif

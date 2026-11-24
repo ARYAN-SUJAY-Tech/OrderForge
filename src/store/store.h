@@ -13,24 +13,13 @@
 
 #include "common/buf.h"
 #include "common/config.h"
+#include "common/proto.h" /* of_req_t, of_method_t */
+#include "common/stock.h"
 #include "store/db.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-typedef enum { OF_GET, OF_POST, OF_PUT, OF_DELETE, OF_METHOD_OTHER } of_method_t;
-
-typedef struct {
-    of_method_t method;
-    const char *path;          /* "/api/products/3", no query string */
-    const char *query;         /* raw query string, "" if none */
-    const char *body;
-    size_t      body_len;
-    const char *session_token; /* value of the of_session cookie, "" if none */
-    const char *csrf_token;    /* X-CSRF-Token header, "" if none */
-    const char *ip;            /* client address as seen by Apache */
-} of_req_t;
 
 #define OF_COOKIE_MAX 256
 
@@ -40,22 +29,58 @@ typedef struct {
     char  set_cookie[OF_COOKIE_MAX]; /* "" when no cookie is set */
 } of_resp_t;
 
+/*
+ * How checkout protects stock (store.stock_mode):
+ *   naive         read stock, check, write stock - qty back. No lock: lost updates
+ *                 oversell under concurrency. The benchmark baseline.
+ *   db-lock       SELECT ... FOR UPDATE on each inventory row (ascending product id, so
+ *                 no deadlock), then a guarded relative UPDATE. Correct; serialises
+ *                 buyers of the same product inside MySQL.
+ *   lockfree-shm  reserve every line with a CAS loop on the shared-memory stock table
+ *                 first (sold-out buyers are rejected without touching MySQL), then
+ *                 commit with the guarded relative UPDATE. Correct and the default.
+ */
 typedef enum {
-    STOCK_NAIVE = 0,  /* read-modify-write with no lock: oversells under load (baseline) */
+    STOCK_NAIVE = 0,
+    STOCK_DBLOCK = 1,
+    STOCK_LOCKFREE = 2,
 } stock_mode_t;
 
+const char *stock_mode_name(stock_mode_t m);
+int         stock_mode_parse(const char *s); /* -1 if unknown */
+
 typedef struct {
-    db_t        *db;
-    stock_mode_t stock_mode;
-    int64_t      naive_delay_us; /* widen the naive race window for demos; 0 in normal use */
-    int64_t      session_ttl_s;
-    bool         cookie_secure;  /* add "Secure" to the cookie once Apache terminates TLS */
-    char         dummy_hash[128];/* verified against for unknown emails: equal login timing */
+    db_t          *db;
+    stock_table_t *stock;        /* shared-memory table (of-core); NULL disables lockfree */
+    stock_mode_t   stock_mode;
+    int64_t        naive_delay_us; /* widen the naive race window for demos; 0 in normal use */
+    int64_t        session_ttl_s;
+    bool           cookie_secure;  /* add "Secure" to the cookie once Apache terminates TLS */
+    char           dummy_hash[128];/* verified against for unknown emails: equal login timing */
+    const of_config_t *cfg;        /* kept for reconnecting */
 } store_t;
 
-/* Connect to MySQL and read store.* / auth.* settings. 0 or -1 with err. */
-int  store_init(store_t *s, const of_config_t *cfg, char *err, size_t errlen);
+/* Connect to MySQL and read store.* / auth.* settings. stock may be NULL unless the mode
+ * is lockfree-shm. mode_override >= 0 replaces store.stock_mode. 0 or -1 with err. */
+int  store_init(store_t *s, const of_config_t *cfg, stock_table_t *stock, int mode_override,
+                char *err, size_t errlen);
 void store_close(store_t *s);
+
+/* Replace a broken MySQL connection. 0 or -1. */
+int  store_reconnect(store_t *s, char *err, size_t errlen);
+
+/* Fill the shared-memory table from MySQL (stock_on_hand, price) for every product.
+ * Returns the number of products loaded, or -1. */
+int  store_load_stock(db_t *db, stock_table_t *t, char *err, size_t errlen);
+
+/*
+ * Stock invariants, used by of-ctl and of-bench. Writes a human-readable report to out.
+ * When t is non-NULL it also checks that the shared-memory counters match MySQL
+ * (available == stock_on_hand, reserved == 0 while no checkout is in flight).
+ * Returns the number of failing products (0 = all good), or -1 on database error.
+ * *oversold receives the total units sold beyond what existed.
+ */
+int  store_check_invariants(db_t *db, const stock_table_t *t, buf_t *out, int64_t *oversold);
 
 void of_resp_init(of_resp_t *r);
 void of_resp_free(of_resp_t *r);
@@ -65,7 +90,5 @@ void store_handle(store_t *s, const of_req_t *req, of_resp_t *resp);
 
 /* Argon2id hashing (libsodium), shared with of-ctl. 0 or -1. */
 int store_hash_password(const char *password, char *out, size_t outlen);
-
-const char *of_status_text(int status);
 
 #endif

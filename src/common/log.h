@@ -27,6 +27,10 @@ typedef enum {
 
 /* path NULL or "-" logs to stderr. Returns 0, or -1 with errno set. */
 int  of_log_open(const char *path, const char *proc, of_log_level_t min_level);
+
+/* Open <log.dir>/<proc>.log at log.level from a config ("-" for stderr), creating the
+ * directory if needed. Prints the reason to stderr and returns -1 on failure. */
+int  of_log_open_config(const void *cfg, const char *proc);
 int  of_log_reopen(void);
 void of_log_close(void);
 void of_log_set_level(of_log_level_t min_level);

@@ -51,6 +51,7 @@ static const route_t routes[] = {
     {OF_DELETE, "/api/admin/products/:id",          ADMIN,  h_admin_product_delete},
     {OF_POST,   "/api/admin/products/:id/stock",    ADMIN,  h_admin_stock},
     {OF_GET,    "/api/admin/orders",                ADMIN,  h_admin_orders},
+    {OF_GET,    "/api/admin/system",                ADMIN,  h_admin_system},
 };
 
 /* ------------------------------------------------------------------ init */
@@ -64,22 +65,44 @@ int store_hash_password(const char *password, char *out, size_t outlen)
                              crypto_pwhash_MEMLIMIT_INTERACTIVE);
 }
 
-int store_init(store_t *s, const of_config_t *cfg, char *err, size_t errlen)
+static const char *const mode_names[] = {"naive", "db-lock", "lockfree-shm"};
+
+const char *stock_mode_name(stock_mode_t m)
+{
+    return (unsigned)m < 3 ? mode_names[m] : "unknown";
+}
+
+int stock_mode_parse(const char *s)
+{
+    for (int i = 0; i < 3; i++)
+        if (s && strcmp(s, mode_names[i]) == 0)
+            return i;
+    return -1;
+}
+
+int store_init(store_t *s, const of_config_t *cfg, stock_table_t *stock, int mode_override,
+               char *err, size_t errlen)
 {
     memset(s, 0, sizeof *s);
+    s->cfg = cfg;
+    s->stock = stock;
     if (sodium_init() < 0) {
         snprintf(err, errlen, "libsodium init failed");
         return -1;
     }
 
-    const char *mode = of_config_get(cfg, "store.stock_mode", "naive");
-    if (strcmp(mode, "naive") == 0) {
-        s->stock_mode = STOCK_NAIVE;
-    } else {
-        snprintf(err, errlen, "store.stock_mode '%s' is not available yet (phase 1: naive)",
-                 mode);
+    int mode = mode_override >= 0
+                   ? mode_override
+                   : stock_mode_parse(of_config_get(cfg, "store.stock_mode", "lockfree-shm"));
+    if (mode < 0) {
+        snprintf(err, errlen, "store.stock_mode must be naive, db-lock or lockfree-shm");
         return -1;
     }
+    if (mode == STOCK_LOCKFREE && !stock) {
+        snprintf(err, errlen, "lockfree-shm needs the shared-memory stock table");
+        return -1;
+    }
+    s->stock_mode = (stock_mode_t)mode;
 
     int ok1, ok2;
     s->naive_delay_us = of_config_get_long(cfg, "store.naive_delay_us", 0, 0, 1000000, &ok1);
@@ -114,6 +137,109 @@ void store_close(store_t *s)
     s->db = NULL;
 }
 
+int store_reconnect(store_t *s, char *err, size_t errlen)
+{
+    db_t *fresh = db_connect(s->cfg, err, errlen);
+    if (!fresh)
+        return -1;
+    db_close(s->db);
+    s->db = fresh;
+    return 0;
+}
+
+int store_load_stock(db_t *db, stock_table_t *t, char *err, size_t errlen)
+{
+    db_res_t r;
+    if (db_query(db, &r,
+                 "SELECT p.id, i.stock_on_hand, p.price_paise FROM products p "
+                 "JOIN inventory i ON i.product_id = p.id ORDER BY p.id",
+                 "") != 0) {
+        snprintf(err, errlen, "loading stock: %s", db_error(db));
+        return -1;
+    }
+    int n = 0;
+    while (db_fetch(&r) == 1) {
+        if (!stock_upsert(t, (uint64_t)db_int(&r, 0), (int32_t)db_int(&r, 1), db_int(&r, 2))) {
+            snprintf(err, errlen, "stock table full after %d products (raise core.stock_capacity)",
+                     n);
+            db_res_free(&r);
+            return -1;
+        }
+        n++;
+    }
+    db_res_free(&r);
+    return n;
+}
+
+int store_check_invariants(db_t *db, const stock_table_t *t, buf_t *out, int64_t *oversold)
+{
+    db_res_t r;
+    if (db_query(db, &r,
+                 "SELECT p.id, p.sku, i.stock_on_hand, "
+                 "  COALESCE((SELECT SUM(delta) FROM stock_movements m "
+                 "            WHERE m.product_id = p.id), 0), "
+                 "  COALESCE((SELECT SUM(oi.qty) FROM order_items oi "
+                 "            JOIN orders o ON o.id = oi.order_id "
+                 "            WHERE oi.product_id = p.id "
+                 "              AND o.status NOT IN ('cancelled', 'refunded')), 0) "
+                 "FROM products p JOIN inventory i ON i.product_id = p.id ORDER BY p.id",
+                 "") != 0)
+        return -1;
+
+    int products = 0, bad = 0;
+    int64_t over = 0;
+    buf_printf(out, "%-10s %8s %8s %8s %8s %8s  %s\n", "sku", "on_hand", "ledger", "sold",
+               "shm_av", "shm_res", "result");
+    while (db_fetch(&r) == 1) {
+        products++;
+        uint64_t id = (uint64_t)db_int(&r, 0);
+        int64_t on_hand = db_int(&r, 2), ledger = db_int(&r, 3), sold = db_int(&r, 4);
+        char problems[128] = "";
+
+        if (on_hand < 0)
+            snprintf(problems + strlen(problems), sizeof problems - strlen(problems),
+                     " negative-stock");
+        if (ledger != on_hand)
+            snprintf(problems + strlen(problems), sizeof problems - strlen(problems),
+                     " ledger-mismatch%s", ledger < 0 ? "(oversold)" : "");
+        if (ledger < 0)
+            over += -ledger;
+
+        long long shm_av = -1, shm_res = -1;
+        if (t) {
+            stock_slot_t *s = stock_find(t, id);
+            if (!s) {
+                snprintf(problems + strlen(problems), sizeof problems - strlen(problems),
+                         " missing-from-shm");
+            } else {
+                shm_av = atomic_load(&s->available);
+                shm_res = atomic_load(&s->reserved);
+                if (shm_av != on_hand || shm_res != 0)
+                    snprintf(problems + strlen(problems), sizeof problems - strlen(problems),
+                             " shm-drift");
+            }
+        }
+        if (problems[0]) {
+            bad++;
+            buf_printf(out, "%-10s %8lld %8lld %8lld %8lld %8lld %s\n", db_str(&r, 1),
+                       (long long)on_hand, (long long)ledger, (long long)sold, shm_av, shm_res,
+                       problems);
+        }
+    }
+    db_res_free(&r);
+
+    if (bad == 0)
+        buf_printf(out, "all %d products balance: stock_on_hand == SUM(stock_movements), "
+                        "none negative%s\n",
+                   products, t ? ", shared memory matches MySQL" : "");
+    else
+        buf_printf(out, "%d of %d products FAIL; %lld units oversold\n", bad, products,
+                   (long long)over);
+    if (oversold)
+        *oversold = over;
+    return bad;
+}
+
 void of_resp_init(of_resp_t *r)
 {
     r->status = 200;
@@ -124,25 +250,6 @@ void of_resp_init(of_resp_t *r)
 void of_resp_free(of_resp_t *r)
 {
     buf_free(&r->body);
-}
-
-const char *of_status_text(int status)
-{
-    switch (status) {
-    case 200: return "OK";
-    case 201: return "Created";
-    case 400: return "Bad Request";
-    case 401: return "Unauthorized";
-    case 403: return "Forbidden";
-    case 404: return "Not Found";
-    case 405: return "Method Not Allowed";
-    case 409: return "Conflict";
-    case 413: return "Payload Too Large";
-    case 429: return "Too Many Requests";
-    case 500: return "Internal Server Error";
-    case 503: return "Service Unavailable";
-    default:  return "Unknown";
-    }
 }
 
 /* ------------------------------------------------------------------ helpers */

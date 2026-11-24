@@ -8,6 +8,7 @@
  */
 #include "store/internal.h"
 
+#include "common/log.h"
 #include "common/util.h"
 
 #include <ctype.h>
@@ -162,6 +163,10 @@ void h_admin_product_create(ctx_t *c)
         return;
     }
 
+    /* Publish the new product in shared memory so it can be reserved. */
+    if (c->s->stock && !stock_upsert(c->s->stock, (uint64_t)id, (int32_t)stock, price))
+        LOG_ERROR("stock_table_full", "product %lld not added to shared memory", (long long)id);
+
     char target[48];
     snprintf(target, sizeof target, "product:%lld", (long long)id);
     audit(c, "product_create", target, sku);
@@ -308,7 +313,25 @@ void h_admin_stock(ctx_t *c)
     char actor[32];
     snprintf(actor, sizeof actor, "admin:%lld", (long long)c->user.id);
 
+    /* Keep the shared-memory table in step with MySQL:
+     *  - removing stock: take it from shared memory FIRST (CAS, never below zero), so
+     *    units already reserved by in-flight checkouts can never be removed under them;
+     *  - adding stock: write MySQL first, then publish it in shared memory, so a buyer
+     *    can never reserve units that are not durable yet. */
+    stock_slot_t *slot = c->s->stock ? stock_find(c->s->stock, c->id) : NULL;
+    bool shm_taken = false;
+    if (slot && delta < 0 && c->s->stock_mode == STOCK_LOCKFREE) {
+        if (!stock_adjust(slot, (int32_t)delta)) {
+            resp_error(c, 409, "insufficient_stock",
+                       "stock cannot go below zero (some units may be reserved by checkouts)");
+            return;
+        }
+        shm_taken = true;
+    }
+
     if (db_begin(c->db) != 0) {
+        if (shm_taken)
+            stock_adjust(slot, (int32_t)-delta);
         resp_db_error(c);
         return;
     }
@@ -319,11 +342,15 @@ void h_admin_stock(ctx_t *c)
                         "iii", delta, c->id, delta);
     if (n < 0) {
         (void)db_rollback(c->db);
+        if (shm_taken)
+            stock_adjust(slot, (int32_t)-delta);
         resp_db_error(c);
         return;
     }
     if (n == 0) {
         (void)db_rollback(c->db);
+        if (shm_taken)
+            stock_adjust(slot, (int32_t)-delta);
         int64_t exists;
         if (db_query_int(c->db, &exists, "SELECT 1 FROM inventory WHERE product_id = ?", "i",
                          c->id) == 1)
@@ -337,9 +364,16 @@ void h_admin_stock(ctx_t *c)
                 "iiss", c->id, delta, reason, actor) != 1 ||
         db_commit(c->db) != 0) {
         (void)db_rollback(c->db);
+        if (shm_taken)
+            stock_adjust(slot, (int32_t)-delta);
         resp_db_error(c);
         return;
     }
+    /* Committed. Additions become sellable only now; removals were taken up front. In the
+     * other modes shared memory simply mirrors MySQL for of-ctl. */
+    if (slot && !shm_taken && !stock_adjust(slot, (int32_t)delta))
+        LOG_WARN("stock_drift", "shared memory could not apply %+lld to product %lld",
+                 (long long)delta, (long long)c->id);
 
     char target[48], detail[64];
     snprintf(target, sizeof target, "product:%lld", (long long)c->id);
@@ -399,4 +433,36 @@ void h_admin_orders(ctx_t *c)
     buf_json_kv_int(b, "total", total);
     buf_puts(b, "}");
     db_res_free(&r);
+}
+
+/* GET /api/admin/system: the engine's configuration and live counters. */
+void h_admin_system(ctx_t *c)
+{
+    buf_t *b = &c->resp->body;
+    buf_puts(b, "{");
+    buf_json_kv_str(b, "stock_mode", stock_mode_name(c->s->stock_mode));
+    if (c->s->stock && c->s->stock->shm) {
+        const stock_shm_t *h = c->s->stock->shm;
+        const stock_metrics_t *m = &h->metrics;
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "products_in_shm", (int64_t)atomic_load(&h->count));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "started_unix", atomic_load(&h->started_unix));
+        buf_puts(b, ",\"metrics\":{");
+        buf_json_kv_int(b, "requests_total", (int64_t)atomic_load(&m->requests_total));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "busy_rejects", (int64_t)atomic_load(&m->busy_rejects));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "queue_depth", (int64_t)atomic_load(&m->queue_depth));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "orders_total", (int64_t)atomic_load(&m->orders_total));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "orders_failed", (int64_t)atomic_load(&m->orders_failed));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "cas_retries", (int64_t)atomic_load(&m->cas_retries));
+        buf_puts(b, ",");
+        buf_json_kv_int(b, "active_workers", (int64_t)atomic_load(&m->active_workers));
+        buf_puts(b, "}");
+    }
+    buf_puts(b, "}");
 }

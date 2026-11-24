@@ -2,7 +2,7 @@
 # Copy to conf/orderforge.conf (scripts/setup-db.sh does this) and keep it mode 0600.
 # The real file holds secrets and is git-ignored.
 
-# ---- MySQL
+# ---- MySQL (used by of-core, of-ctl and of-bench; of-api never touches the database)
 db.host     = localhost
 db.port     = 3306
 db.user     = orderforge
@@ -14,13 +14,35 @@ db.name     = orderforge
 log.dir   = run/log
 log.level = info
 
-# ---- of-api (FastCGI workers behind Apache)
-api.listen  = 127.0.0.1:9000
-api.workers = 4
+# ---- of-core (the engine)
+# Unix socket of-api connects to (mode 0660; peers are checked with SO_PEERCRED).
+core.socket = run/of-core.sock
+# Worker threads, each with its own MySQL connection. Default: one per CPU core.
+# core.workers = 8
+# Bounded job queue. When full, requests are answered 503 "busy" at once (backpressure).
+core.queue_size = 1024
+# A request that waited longer than this in the queue is answered 503 without running.
+core.job_timeout_ms = 10000
+# Requests slower than this are logged with their trace id.
+core.slow_ms = 500
+# POSIX shared-memory stock table (visible in /dev/shm) and its capacity in products.
+core.shm_name = /orderforge
+core.stock_capacity = 4096
+# Extra uid allowed to connect to the core socket (default: only our own uid).
+# core.allow_uid = 33
 
-# ---- store
-# Phase 1 has only the naive stock mode (the benchmark baseline, which can oversell).
-store.stock_mode = naive
+# ---- of-api (pre-forked FastCGI workers behind Apache)
+api.listen  = 127.0.0.1:9000
+# Each worker holds one connection to of-core, so this caps requests in flight.
+api.workers = 16
+# Give up on of-core after this long and answer 502.
+api.core_timeout_s = 30
+
+# ---- stock protection: naive | db-lock | lockfree-shm   (of-core -m overrides it)
+#   naive         unsafe read-modify-write: the benchmark baseline, oversells under load
+#   db-lock       SELECT ... FOR UPDATE + guarded update: correct, serialises in MySQL
+#   lockfree-shm  CAS reservation in shared memory + guarded update: correct and fastest
+store.stock_mode = lockfree-shm
 # Extra delay inside the naive read-modify-write, in microseconds. Widens the race
 # window for demonstrations; keep 0 for normal use.
 store.naive_delay_us = 0

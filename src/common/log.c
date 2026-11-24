@@ -1,5 +1,8 @@
 #include "common/log.h"
 
+#include "common/config.h"
+#include "common/util.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -155,4 +158,27 @@ void of_log(of_log_level_t lvl, const char *event, const char *fmt, ...)
     do {
         w = write(log_fd, line, (size_t)n);
     } while (w < 0 && errno == EINTR);
+}
+
+int of_log_open_config(const void *cfgp, const char *proc)
+{
+    const of_config_t *cfg = cfgp;
+    const char *dir = of_config_get(cfg, "log.dir", "run/log");
+    int lvl = of_log_level_parse(of_config_get(cfg, "log.level", "info"));
+    if (lvl < 0)
+        lvl = OF_LOG_INFO;
+    if (strcmp(dir, "-") == 0)
+        return of_log_open(NULL, proc, (of_log_level_t)lvl);
+
+    char path[512];
+    if (of_mkdir_p(dir, 0750) != 0) {
+        fprintf(stderr, "%s: mkdir %s: %s\n", proc, dir, strerror(errno));
+        return -1;
+    }
+    snprintf(path, sizeof path, "%s/%s.log", dir, proc);
+    if (of_log_open(path, proc, (of_log_level_t)lvl) != 0) {
+        fprintf(stderr, "%s: open %s: %s\n", proc, path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }

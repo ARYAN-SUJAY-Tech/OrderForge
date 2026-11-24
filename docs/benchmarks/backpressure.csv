@@ -1,0 +1,7 @@
+label,mode,skus,clients,browse,duration_s,ok_requests,req_per_s,orders,orders_per_s,browse_p50_ms,browse_p95_ms,browse_p99_ms,add_p50_ms,add_p95_ms,add_p99_ms,checkout_p50_ms,checkout_p95_ms,checkout_p99_ms,checkout_max_ms,all_p50_ms,all_p95_ms,all_p99_ms,busy_503,limited_429,other_5xx,other_4xx,network,sold_out,invariants_pass
+backpressure,lockfree-shm,spread,25,4,15,7725,515.0,430,28.7,31.5,54.0,63.1,36.0,59.3,72.6,52.8,79.2,96.5,113.3,33.0,57.2,70.5,46777,0,0,0,0,0,1
+backpressure,lockfree-shm,spread,100,4,15,7723,514.9,104,6.9,34.5,66.9,87.7,40.6,74.5,96.1,66.1,143.9,163.4,163.4,35.9,69.6,95.2,220609,0,0,0,0,0,1
+backpressure,lockfree-shm,spread,250,4,15,7761,517.4,98,6.5,43.4,75.0,93.3,50.2,85.2,104.3,74.5,108.1,176.1,176.1,45.1,78.2,97.1,231811,0,0,1,0,0,1
+backpressure,lockfree-shm,spread,500,4,15,8463,564.2,115,7.7,59.3,90.6,116.4,64.3,98.4,125.2,77.9,146.8,175.6,175.6,60.6,93.2,119.4,212567,0,0,1,0,0,1
+backpressure,lockfree-shm,spread,1000,4,15,8756,583.7,158,10.5,63.3,102.2,1097.9,69.5,118.6,1118.1,84.7,1100.8,1112.1,1112.1,64.6,107.3,1103.8,221899,0,0,1,0,0,1
+backpressure,lockfree-shm,spread,2000,4,15,8412,560.8,148,9.9,66.2,1084.3,1332.7,72.2,1084.2,1323.1,87.0,157.5,1307.8,1307.8,67.6,1084.3,1325.3,218981,0,0,1,217,0,1

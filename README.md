@@ -16,9 +16,9 @@ Apache.
 | 2 | Core engine: of-core, binary protocol, lock-free CAS reservation, three stock modes, of-bench | done (gate 2) |
 | 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | done (gate 3) |
 | 4 | Write-ahead log, crash recovery, of-supervisor, metrics endpoint, of-ctl status, chaos test | done (gate 4) |
-| 5 | Hardening: rate limits, CSRF/Origin, privilege drop, failure injection, sanitizers, Valgrind | **done** |
-| 6 | Benchmarks and chaos tests | next |
-| 7 | Documentation, video, slides | |
+| 5 | Hardening: rate limits, CSRF/Origin, privilege drop, failure injection, sanitizers, Valgrind | done |
+| 6 | Benchmarks: mixed workloads, hot vs spread SKUs, the five headline experiments, charts, report (gate 5) | **done** |
+| 7 | Documentation, video, slides | next |
 
 ## Quick start
 
@@ -90,8 +90,9 @@ Browser → Apache → of-api (pre-forked FastCGI) → Unix socket, binary frame
   It reads shared memory read-only and never calls the core.
 - **Metrics:** `/api/metrics` in Prometheus format, localhost only, with a latency
   histogram and per-product live stock.
-- **of-bench**: an epoll load generator with a barrier-synchronised rush, latency
-  percentiles, invariant checks and CSV output.
+- **of-bench**: a load generator. `oversell` is a barrier-synchronised rush; `mix` is
+  closed-loop shoppers (browse, add, checkout) over one hot SKU or 1,000. Exact latency
+  percentiles per operation, invariant checks after every run, CSV output.
 
 ## The oversell experiment (gate 2)
 
@@ -150,12 +151,30 @@ The security review in [docs/security-review.md](docs/security-review.md) covers
 endpoint and process boundary, and lists six findings fixed in this phase. One example:
 login could be forged from another site with a `text/plain` HTML form.
 
+## Benchmarks (phase 6)
+
+```sh
+make MODE=release
+scripts/bench-experiments.sh --yes     # all five experiments + charts, ~30 min, resets the DB
+```
+
+| Experiment | Result (one laptop, on battery; details in the report) |
+|---|---|
+| Oversell: 1,000 buyers, 50 units | db-lock and lockfree-shm sold exactly 50 in every run; naive sold ~590 |
+| Throughput, 50 → 1,000 clients | ~2,200 requests/s, ~450 orders/s; the CPUs (mostly MySQL) are the limit |
+| One hot SKU vs 1,000 SKUs | a hot row halves throughput in every mode; moving the row lock to just before COMMIT gave 1.5–1.9× |
+| `kill -9` of-core × 10 under load | back in 0.89–1.0 s every time, all invariants intact |
+| 2-worker core under 2,000 clients | up to 15,000 req/s refused with 503 busy; no crash; memory flat at 20 MiB |
+
+Method, hardware, charts and limitations: [docs/benchmark-report.md](docs/benchmark-report.md).
+
 ## Documentation
 
 - [docs/install.md](docs/install.md): installation guide
 - [docs/design.md](docs/design.md): design document (updated every phase)
 - [docs/api.md](docs/api.md): API reference
 - [docs/security-review.md](docs/security-review.md): security review, endpoint by endpoint
+- [docs/benchmark-report.md](docs/benchmark-report.md): benchmark report, with raw results in [docs/benchmarks/](docs/benchmarks/)
 - [docs/user-manual.md](docs/user-manual.md): customer and admin guide
 
 ## Build modes

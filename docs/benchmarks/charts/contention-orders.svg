@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 390" width="720" height="390" role="img" aria-label="Contention: orders per second, hot SKU vs spread">
+
+<style>
+  .bg { fill: none; }
+  .t1 { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t2 { fill: #52514e; font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t3 { fill: #52514e; font: 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .lab { fill: #0b0b0b; font: 600 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .grid { stroke: #e4e3de; stroke-width: 1; }
+  .axis { stroke: #8a8984; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .gap { stroke: #ffffff; }
+  .s1 { fill: #2a78d6; stroke: #2a78d6; }
+  .s2 { fill: #eb6834; stroke: #eb6834; }
+  .s3 { fill: #1baf7a; stroke: #1baf7a; }
+  .s4 { fill: #eda100; stroke: #eda100; }
+  .s8 { fill: #e34948; stroke: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .t1, .lab { fill: #f0efec; }
+    .t2, .t3 { fill: #c3c2b7; }
+    .grid { stroke: #3a3935; }
+    .axis { stroke: #77766f; }
+    .ref { stroke: #c3c2b7; }
+    .gap { stroke: #1a1a19; }
+    .s1 { fill: #3987e5; stroke: #3987e5; }
+    .s2 { fill: #d95926; stroke: #d95926; }
+    .s3 { fill: #199e70; stroke: #199e70; }
+    .s4 { fill: #c98500; stroke: #c98500; }
+    .s8 { fill: #e66767; stroke: #e66767; }
+  }
+</style>
+
+<title>Contention: orders per second, hot SKU vs spread</title>
+<text x="16.0" y="24.0" class="t1" text-anchor="start">Contention: orders per second, hot SKU vs spread</text>
+<text x="16.0" y="42.0" class="t2" text-anchor="start">Checkout-only workload (add + checkout per cycle)</text>
+<line x1="70.0" y1="330.0" x2="670.0" y2="330.0" class="axis"/>
+<text x="64.0" y="334.0" class="t3" text-anchor="end">0</text>
+<line x1="70.0" y1="272.5" x2="670.0" y2="272.5" class="grid"/>
+<text x="64.0" y="276.5" class="t3" text-anchor="end">200</text>
+<line x1="70.0" y1="215.0" x2="670.0" y2="215.0" class="grid"/>
+<text x="64.0" y="219.0" class="t3" text-anchor="end">400</text>
+<line x1="70.0" y1="157.5" x2="670.0" y2="157.5" class="grid"/>
+<text x="64.0" y="161.5" class="t3" text-anchor="end">600</text>
+<line x1="70.0" y1="100.0" x2="670.0" y2="100.0" class="grid"/>
+<text x="64.0" y="104.0" class="t3" text-anchor="end">800</text>
+<text x="70.0" y="92.0" class="t2" text-anchor="start">orders per second</text>
+<text x="220.0" y="346.0" class="t3" text-anchor="middle">spread over 1,000 SKUs</text>
+<text x="520.0" y="346.0" class="t3" text-anchor="middle">one hot SKU</text>
+<path d="M134.0,330.0 L134.0,179.4 Q134.0,175.4 138.0,175.4 L186.0,175.4 Q190.0,175.4 190.0,179.4 L190.0,330.0 Z" class="s1"><title>naive, spread over 1,000 SKUs: 538 orders/s</title></path>
+<text x="162.0" y="170.4" class="lab" text-anchor="middle">538</text>
+<path d="M192.0,330.0 L192.0,159.5 Q192.0,155.5 196.0,155.5 L244.0,155.5 Q248.0,155.5 248.0,159.5 L248.0,330.0 Z" class="s2"><title>db-lock, spread over 1,000 SKUs: 607 orders/s</title></path>
+<text x="220.0" y="150.5" class="lab" text-anchor="middle">607</text>
+<path d="M250.0,330.0 L250.0,195.8 Q250.0,191.8 254.0,191.8 L302.0,191.8 Q306.0,191.8 306.0,195.8 L306.0,330.0 Z" class="s3"><title>lockfree-shm, spread over 1,000 SKUs: 481 orders/s</title></path>
+<text x="278.0" y="186.8" class="lab" text-anchor="middle">481</text>
+<path d="M434.0,330.0 L434.0,252.6 Q434.0,248.6 438.0,248.6 L486.0,248.6 Q490.0,248.6 490.0,252.6 L490.0,330.0 Z" class="s1"><title>naive, one hot SKU: 283 orders/s</title></path>
+<text x="462.0" y="243.6" class="lab" text-anchor="middle">283</text>
+<path d="M492.0,330.0 L492.0,264.4 Q492.0,260.4 496.0,260.4 L544.0,260.4 Q548.0,260.4 548.0,264.4 L548.0,330.0 Z" class="s2"><title>db-lock, one hot SKU: 242 orders/s</title></path>
+<text x="520.0" y="255.4" class="lab" text-anchor="middle">242</text>
+<path d="M550.0,330.0 L550.0,258.7 Q550.0,254.7 554.0,254.7 L602.0,254.7 Q606.0,254.7 606.0,258.7 L606.0,330.0 Z" class="s3"><title>lockfree-shm, one hot SKU: 262 orders/s</title></path>
+<text x="578.0" y="249.7" class="lab" text-anchor="middle">262</text>
+<rect x="70.0" y="54.0" width="12" height="12" rx="3" class="s1"/>
+<text x="87.0" y="64.0" class="t2" text-anchor="start">naive</text>
+<rect x="135.0" y="54.0" width="12" height="12" rx="3" class="s2"/>
+<text x="152.0" y="64.0" class="t2" text-anchor="start">db-lock</text>
+<rect x="214.0" y="54.0" width="12" height="12" rx="3" class="s3"/>
+<text x="231.0" y="64.0" class="t2" text-anchor="start">lockfree-shm</text>
+</svg>

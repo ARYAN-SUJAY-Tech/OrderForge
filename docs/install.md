@@ -208,6 +208,45 @@ To run one mode by hand while `run.sh` is running:
 ./build/debug/of-bench oversell --buyers 1000 --stock 50
 ```
 
+## 11. The full benchmark suite (phase 6)
+
+All five headline experiments, with charts, in one command (about 25 minutes). Use a
+release build: the debug build is compiled without optimisation.
+
+```sh
+make MODE=release
+./build/debug/of-ctl -c conf/orderforge.conf stop     # the suite runs its own stack
+scripts/bench-experiments.sh --yes
+```
+
+- It **resets the database** before each experiment and stock mode, and once more at the
+  end, so any orders you placed are gone afterwards.
+- It needs Apache running. It starts and stops its own of-supervisor from
+  `conf/bench.conf`: a copy of your config with rate limits off, every payment
+  approved, a 30 s reservation TTL and quieter logs. That file is git-ignored.
+- Results go to `bench-results/run-<timestamp>/`:
+  - one CSV per experiment;
+  - `output.txt` (everything printed);
+  - `hardware.txt` (CPU, memory, kernel, MySQL and Apache versions, power profile);
+  - `charts/*.svg`.
+- Run a subset, or make it shorter:
+
+  ```sh
+  EXPERIMENTS="oversell contention" scripts/bench-experiments.sh --yes
+  DURATION=8 CLIENTS_LIST="50 250 1000" scripts/bench-experiments.sh --yes
+  ```
+
+- Redraw the charts from any run: `python3 scripts/plot-bench.py bench-results/run-…`
+- Plug the laptop in and close other heavy programs first; both change the numbers.
+
+The individual tools:
+
+```sh
+./build/release/of-bench seed --skus 1000 --stock 1000000      # of-core must be stopped
+./build/release/of-bench mix --clients 250 --duration 15 --skus spread --csv out.csv
+./build/release/of-bench mix --clients 200 --browse 0 --skus hot   # contention
+```
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -226,6 +265,8 @@ To run one mode by hand while `run.sh` is running:
 | A MySQL error "Unknown column 'wal_txid'" | The schema is from phase 3; run `scripts/load-db.sh` |
 | of-core: "cannot create shared memory" | A stale object owned by another user; check `ls -l /dev/shm/orderforge` |
 | of-bench FAIL mentioning "oversold units from an earlier run" | A naive run left the ledger unbalanced; reset with `scripts/load-db.sh` |
+| `of-bench: no BENCH-* products` | `mix` needs the benchmark catalogue: stop of-core, run `of-bench seed`, start it again (the suite does this for you) |
+| `bench-experiments.sh`: "OrderForge (of-core) is running" | The suite runs its own stack; stop yours with `of-ctl -c conf/orderforge.conf stop` |
 | of-core: "pay.hmac_key missing or invalid" | Add a key: `echo "pay.hmac_key = $(openssl rand -hex 32)" >> conf/orderforge.conf` |
 | of-core: "queue ... exists with message size" | The queue was created by an older build; `rm /dev/mqueue/orderforge-pay-*` |
 | of-core: "mq_open ... Invalid argument" | `pay.mq_maxmsg` is above `/proc/sys/fs/mqueue/msg_max` (10 for normal users); keep it at 10 |

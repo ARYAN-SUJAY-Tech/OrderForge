@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 390" width="720" height="390" role="img" aria-label="Oversell test: units sold for 50 units of stock">
+
+<style>
+  .bg { fill: none; }
+  .t1 { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t2 { fill: #52514e; font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t3 { fill: #52514e; font: 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .lab { fill: #0b0b0b; font: 600 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .grid { stroke: #e4e3de; stroke-width: 1; }
+  .axis { stroke: #8a8984; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .gap { stroke: #ffffff; }
+  .s1 { fill: #2a78d6; stroke: #2a78d6; }
+  .s2 { fill: #eb6834; stroke: #eb6834; }
+  .s3 { fill: #1baf7a; stroke: #1baf7a; }
+  .s4 { fill: #eda100; stroke: #eda100; }
+  .s8 { fill: #e34948; stroke: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .t1, .lab { fill: #f0efec; }
+    .t2, .t3 { fill: #c3c2b7; }
+    .grid { stroke: #3a3935; }
+    .axis { stroke: #77766f; }
+    .ref { stroke: #c3c2b7; }
+    .gap { stroke: #1a1a19; }
+    .s1 { fill: #3987e5; stroke: #3987e5; }
+    .s2 { fill: #d95926; stroke: #d95926; }
+    .s3 { fill: #199e70; stroke: #199e70; }
+    .s4 { fill: #c98500; stroke: #c98500; }
+    .s8 { fill: #e66767; stroke: #e66767; }
+  }
+</style>
+
+<title>Oversell test: units sold for 50 units of stock</title>
+<text x="16.0" y="24.0" class="t1" text-anchor="start">Oversell test: units sold for 50 units of stock</text>
+<text x="16.0" y="42.0" class="t2" text-anchor="start">1,000 buyers check out the same SKU at the same instant; each bar is one run</text>
+<line x1="70.0" y1="330.0" x2="630.0" y2="330.0" class="axis"/>
+<text x="64.0" y="334.0" class="t3" text-anchor="end">0</text>
+<line x1="70.0" y1="272.5" x2="630.0" y2="272.5" class="grid"/>
+<text x="64.0" y="276.5" class="t3" text-anchor="end">200</text>
+<line x1="70.0" y1="215.0" x2="630.0" y2="215.0" class="grid"/>
+<text x="64.0" y="219.0" class="t3" text-anchor="end">400</text>
+<line x1="70.0" y1="157.5" x2="630.0" y2="157.5" class="grid"/>
+<text x="64.0" y="161.5" class="t3" text-anchor="end">600</text>
+<line x1="70.0" y1="100.0" x2="630.0" y2="100.0" class="grid"/>
+<text x="64.0" y="104.0" class="t3" text-anchor="end">800</text>
+<text x="70.0" y="92.0" class="t2" text-anchor="start">units sold</text>
+<text x="163.3" y="346.0" class="t3" text-anchor="middle">naive</text>
+<text x="350.0" y="346.0" class="t3" text-anchor="middle">db-lock</text>
+<text x="536.7" y="346.0" class="t3" text-anchor="middle">lockfree-shm</text>
+<path d="M105.3,330.0 L105.3,163.8 Q105.3,159.8 109.3,159.8 L138.7,159.8 Q142.7,159.8 142.7,163.8 L142.7,330.0 Z" class="s1"><title>naive, run 1: 592 units sold (stock 50)</title></path>
+<text x="124.0" y="154.8" class="lab" text-anchor="middle">592</text>
+<path d="M144.7,330.0 L144.7,165.2 Q144.7,161.2 148.7,161.2 L178.0,161.2 Q182.0,161.2 182.0,165.2 L182.0,330.0 Z" class="s1"><title>naive, run 2: 587 units sold (stock 50)</title></path>
+<text x="163.3" y="156.2" class="lab" text-anchor="middle">587</text>
+<path d="M184.0,330.0 L184.0,165.0 Q184.0,161.0 188.0,161.0 L217.3,161.0 Q221.3,161.0 221.3,165.0 L221.3,330.0 Z" class="s1"><title>naive, run 3: 588 units sold (stock 50)</title></path>
+<text x="202.7" y="156.0" class="lab" text-anchor="middle">588</text>
+<path d="M292.0,330.0 L292.0,319.6 Q292.0,315.6 296.0,315.6 L325.3,315.6 Q329.3,315.6 329.3,319.6 L329.3,330.0 Z" class="s2"><title>db-lock, run 1: 50 units sold (stock 50)</title></path>
+<text x="310.7" y="310.6" class="lab" text-anchor="middle">50</text>
+<path d="M331.3,330.0 L331.3,319.6 Q331.3,315.6 335.3,315.6 L364.7,315.6 Q368.7,315.6 368.7,319.6 L368.7,330.0 Z" class="s2"><title>db-lock, run 2: 50 units sold (stock 50)</title></path>
+<text x="350.0" y="310.6" class="lab" text-anchor="middle">50</text>
+<path d="M370.7,330.0 L370.7,319.6 Q370.7,315.6 374.7,315.6 L404.0,315.6 Q408.0,315.6 408.0,319.6 L408.0,330.0 Z" class="s2"><title>db-lock, run 3: 50 units sold (stock 50)</title></path>
+<text x="389.3" y="310.6" class="lab" text-anchor="middle">50</text>
+<path d="M478.7,330.0 L478.7,319.6 Q478.7,315.6 482.7,315.6 L512.0,315.6 Q516.0,315.6 516.0,319.6 L516.0,330.0 Z" class="s3"><title>lockfree-shm, run 1: 50 units sold (stock 50)</title></path>
+<text x="497.3" y="310.6" class="lab" text-anchor="middle">50</text>
+<path d="M518.0,330.0 L518.0,319.6 Q518.0,315.6 522.0,315.6 L551.3,315.6 Q555.3,315.6 555.3,319.6 L555.3,330.0 Z" class="s3"><title>lockfree-shm, run 2: 50 units sold (stock 50)</title></path>
+<text x="536.7" y="310.6" class="lab" text-anchor="middle">50</text>
+<path d="M557.3,330.0 L557.3,319.6 Q557.3,315.6 561.3,315.6 L590.7,315.6 Q594.7,315.6 594.7,319.6 L594.7,330.0 Z" class="s3"><title>lockfree-shm, run 3: 50 units sold (stock 50)</title></path>
+<text x="576.0" y="310.6" class="lab" text-anchor="middle">50</text>
+<line x1="70.0" y1="315.6" x2="630.0" y2="315.6" class="ref"/>
+<text x="638.0" y="319.6" class="t2" text-anchor="start">stock: 50</text>
+<rect x="70.0" y="54.0" width="12" height="12" rx="3" class="s1"/>
+<text x="87.0" y="64.0" class="t2" text-anchor="start">naive</text>
+<rect x="135.0" y="54.0" width="12" height="12" rx="3" class="s2"/>
+<text x="152.0" y="64.0" class="t2" text-anchor="start">db-lock</text>
+<rect x="214.0" y="54.0" width="12" height="12" rx="3" class="s3"/>
+<text x="231.0" y="64.0" class="t2" text-anchor="start">lockfree-shm</text>
+</svg>

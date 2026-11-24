@@ -185,7 +185,7 @@ typedef struct {                  // exactly one 64-byte cache line per product
 |---|---|---|
 | naive | Snapshot `SELECT stock`, check, then `UPDATE SET stock = <read> - qty`: a lost-update race | **No.** This is the baseline. Each write is non-negative, so the CHECK constraint never fires, but the ledger records every sale |
 | db-lock | `SELECT ... FOR UPDATE` on each row in ascending product-id order (so no lock cycles), then `UPDATE ... SET stock = stock - n WHERE stock >= n`, checking that one row changed | Yes. Buyers of one product queue on its row lock |
-| lockfree-shm | CAS-reserve every line in shared memory first; a sold-out buyer is rejected without touching MySQL. Then the guarded `UPDATE` and COMMIT. Commit the reservation on success, release it on any failure | Yes, and the fastest |
+| lockfree-shm | CAS-reserve every line in shared memory first; a sold-out buyer is rejected without touching MySQL. Log the reservation in the WAL (one disk flush), then the guarded `UPDATE` and COMMIT. Commit the reservation on success, release it on any failure | Yes. Fastest when buyers lose (a sell-out). When every order succeeds, the extra WAL flush makes it slower than db-lock; see the [benchmark report](benchmark-report.md) |
 
 ### Four layers against overselling
 
@@ -238,6 +238,14 @@ edge: all 64 state pairs, and every actor on each edge.
 **Lock order everywhere:** order row, then payment row, then reservations, then
 inventory rows in ascending product id. Every path takes locks in the same order, so
 no two of them can deadlock.
+
+**Lock late (phase 6).** In checkout, the inventory `UPDATE` is the last statement
+before COMMIT. InnoDB holds the row lock from that statement until the commit, so
+anything placed after it makes the next buyer of the same product wait longer. With one
+hot product, that hold time sets the orders-per-second ceiling in every stock mode.
+Moving the update from the middle of the transaction to the end raised hot-SKU
+throughput by 1.5–1.9× (benchmark report, "Lock late"). It also matches the lock order
+above.
 
 ### Stock across the order's life
 
@@ -723,6 +731,22 @@ children, and fails on any memory error or definite leak. Result: all 12 program
 It found one problem in a test: the queue test's producers spun on a full queue, which
 nearly livelocks under Valgrind (it runs one thread at a time); they now yield.
 
+### Phase 6: benchmarks (gate 5)
+
+The five headline experiments are in the [benchmark report](benchmark-report.md), with
+raw CSVs and charts in [benchmarks/](benchmarks/). The results that change this design:
+
+- **Lock-free admission wins when buyers lose.** In the 1,000-buyer sell-out, p50
+  is 350–450 ms against 630–765 ms for db-lock. When every order succeeds, its extra
+  WAL flush makes it about 15% slower than db-lock.
+- **A hot product is limited by its InnoDB row lock** in every mode, because the
+  durable stock write still serialises on one row. Taking that lock last ("lock late",
+  §6) gave 1.5–1.9× on one hot SKU.
+- **Recovery after `kill -9` takes about 0.9 s** end to end, of which WAL replay is
+  under 80 ms.
+- **Overload is shed with 503 "busy"** at up to 15,000 requests/s, with of-core's
+  memory flat at 20 MiB.
+
 ## 12. Testing
 
 | Layer | What runs | Result |
@@ -739,3 +763,4 @@ nearly livelocks under Valgrind (it runs one thread at a time); they now yield.
 | Privilege drop | `sudo tests/integration/privdrop_test.sh` | Needs root; run it yourself |
 | Everything per build mode | `tests/run-all.sh asan\|ubsan\|tsan` | Phase 5 table above |
 | Memory (Valgrind) | `make valgrind` | Unit tests under memcheck |
+| Benchmarks | `scripts/bench-experiments.sh --yes`: the five headline experiments, CSVs and charts | [benchmark report](benchmark-report.md) |

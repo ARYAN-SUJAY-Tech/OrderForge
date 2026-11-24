@@ -1,0 +1,19 @@
+variant,mode,skus,clients,orders_per_s,checkout_p50_ms,checkout_p95_ms,checkout_p99_ms,invariants_pass
+lock taken mid-transaction (before),naive,spread,200,598.5,202.2,278.2,308.7,0
+lock taken mid-transaction (before),naive,hot,200,154.9,871.1,1345.3,1459.5,0
+lock taken mid-transaction (before),db-lock,spread,200,599.9,205.8,276.3,314.4,1
+lock taken mid-transaction (before),db-lock,hot,200,146.6,944.9,1399.6,1472.7,1
+lock taken mid-transaction (before),lockfree-shm,spread,200,464.8,276.7,355.5,402.4,1
+lock taken mid-transaction (before),lockfree-shm,hot,200,156.3,874.2,1321.6,1376.9,1
+lock late (after),naive,spread,200,639.4,192.0,255.8,301.4,0
+lock late (after),naive,hot,200,289.7,434.3,609.1,659.4,0
+lock late (after),db-lock,spread,200,627.7,194.2,266.2,367.6,1
+lock late (after),db-lock,hot,200,274.0,462.8,660.8,709.4,1
+lock late (after),lockfree-shm,spread,200,464.5,257.9,346.6,394.2,1
+lock late (after),lockfree-shm,hot,200,239.6,539.3,832.8,939.5,1
+lock late + core.wal_group_us = 0,lockfree-shm,spread,200,496.6,251.2,338.3,400.2,1
+lock late + core.wal_group_us = 0,lockfree-shm,hot,200,248.4,515.7,802.7,911.1,1
+lock late + core.wal_group_us = 500,lockfree-shm,spread,200,465.1,264.9,356.9,385.6,1
+lock late + core.wal_group_us = 500,lockfree-shm,hot,200,283.8,446.9,607.5,648.1,1
+lock late + WAL on tmpfs (measurement only: no real flush),lockfree-shm,spread,200,549.5,224.9,278.5,314.2,1
+lock late + WAL on tmpfs (measurement only: no real flush),lockfree-shm,hot,200,268.7,467.9,681.5,840.6,1

@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 390" width="720" height="390" role="img" aria-label="Contention: checkout p99 latency, hot SKU vs spread">
+
+<style>
+  .bg { fill: none; }
+  .t1 { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t2 { fill: #52514e; font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t3 { fill: #52514e; font: 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .lab { fill: #0b0b0b; font: 600 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .grid { stroke: #e4e3de; stroke-width: 1; }
+  .axis { stroke: #8a8984; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .gap { stroke: #ffffff; }
+  .s1 { fill: #2a78d6; stroke: #2a78d6; }
+  .s2 { fill: #eb6834; stroke: #eb6834; }
+  .s3 { fill: #1baf7a; stroke: #1baf7a; }
+  .s4 { fill: #eda100; stroke: #eda100; }
+  .s8 { fill: #e34948; stroke: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .t1, .lab { fill: #f0efec; }
+    .t2, .t3 { fill: #c3c2b7; }
+    .grid { stroke: #3a3935; }
+    .axis { stroke: #77766f; }
+    .ref { stroke: #c3c2b7; }
+    .gap { stroke: #1a1a19; }
+    .s1 { fill: #3987e5; stroke: #3987e5; }
+    .s2 { fill: #d95926; stroke: #d95926; }
+    .s3 { fill: #199e70; stroke: #199e70; }
+    .s4 { fill: #c98500; stroke: #c98500; }
+    .s8 { fill: #e66767; stroke: #e66767; }
+  }
+</style>
+
+<title>Contention: checkout p99 latency, hot SKU vs spread</title>
+<text x="16.0" y="24.0" class="t1" text-anchor="start">Contention: checkout p99 latency, hot SKU vs spread</text>
+<text x="16.0" y="42.0" class="t2" text-anchor="start">Same runs; lower is better</text>
+<line x1="70.0" y1="330.0" x2="670.0" y2="330.0" class="axis"/>
+<text x="64.0" y="334.0" class="t3" text-anchor="end">0</text>
+<line x1="70.0" y1="253.3" x2="670.0" y2="253.3" class="grid"/>
+<text x="64.0" y="257.3" class="t3" text-anchor="end">500</text>
+<line x1="70.0" y1="176.7" x2="670.0" y2="176.7" class="grid"/>
+<text x="64.0" y="180.7" class="t3" text-anchor="end">1k</text>
+<line x1="70.0" y1="100.0" x2="670.0" y2="100.0" class="grid"/>
+<text x="64.0" y="104.0" class="t3" text-anchor="end">1500</text>
+<text x="70.0" y="92.0" class="t2" text-anchor="start">p99 (ms)</text>
+<text x="220.0" y="346.0" class="t3" text-anchor="middle">spread over 1,000 SKUs</text>
+<text x="520.0" y="346.0" class="t3" text-anchor="middle">one hot SKU</text>
+<path d="M134.0,330.0 L134.0,275.5 Q134.0,271.5 138.0,271.5 L186.0,271.5 Q190.0,271.5 190.0,275.5 L190.0,330.0 Z" class="s1"><title>naive, spread over 1,000 SKUs: 381 ms</title></path>
+<text x="162.0" y="266.5" class="lab" text-anchor="middle">381</text>
+<path d="M192.0,330.0 L192.0,286.1 Q192.0,282.1 196.0,282.1 L244.0,282.1 Q248.0,282.1 248.0,286.1 L248.0,330.0 Z" class="s2"><title>db-lock, spread over 1,000 SKUs: 312 ms</title></path>
+<text x="220.0" y="277.1" class="lab" text-anchor="middle">312</text>
+<path d="M250.0,330.0 L250.0,274.5 Q250.0,270.5 254.0,270.5 L302.0,270.5 Q306.0,270.5 306.0,274.5 L306.0,330.0 Z" class="s3"><title>lockfree-shm, spread over 1,000 SKUs: 388 ms</title></path>
+<text x="278.0" y="265.5" class="lab" text-anchor="middle">388</text>
+<path d="M434.0,330.0 L434.0,226.5 Q434.0,222.5 438.0,222.5 L486.0,222.5 Q490.0,222.5 490.0,226.5 L490.0,330.0 Z" class="s1"><title>naive, one hot SKU: 701 ms</title></path>
+<text x="462.0" y="217.5" class="lab" text-anchor="middle">701</text>
+<path d="M492.0,330.0 L492.0,183.6 Q492.0,179.6 496.0,179.6 L544.0,179.6 Q548.0,179.6 548.0,183.6 L548.0,330.0 Z" class="s2"><title>db-lock, one hot SKU: 981 ms</title></path>
+<text x="520.0" y="174.6" class="lab" text-anchor="middle">981</text>
+<path d="M550.0,330.0 L550.0,205.9 Q550.0,201.9 554.0,201.9 L602.0,201.9 Q606.0,201.9 606.0,205.9 L606.0,330.0 Z" class="s3"><title>lockfree-shm, one hot SKU: 836 ms</title></path>
+<text x="578.0" y="196.9" class="lab" text-anchor="middle">836</text>
+<rect x="70.0" y="54.0" width="12" height="12" rx="3" class="s1"/>
+<text x="87.0" y="64.0" class="t2" text-anchor="start">naive</text>
+<rect x="135.0" y="54.0" width="12" height="12" rx="3" class="s2"/>
+<text x="152.0" y="64.0" class="t2" text-anchor="start">db-lock</text>
+<rect x="214.0" y="54.0" width="12" height="12" rx="3" class="s3"/>
+<text x="231.0" y="64.0" class="t2" text-anchor="start">lockfree-shm</text>
+</svg>

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 410" width="720" height="410" role="img" aria-label="Throughput: orders placed per second">
+
+<style>
+  .bg { fill: none; }
+  .t1 { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t2 { fill: #52514e; font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t3 { fill: #52514e; font: 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .lab { fill: #0b0b0b; font: 600 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .grid { stroke: #e4e3de; stroke-width: 1; }
+  .axis { stroke: #8a8984; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .gap { stroke: #ffffff; }
+  .s1 { fill: #2a78d6; stroke: #2a78d6; }
+  .s2 { fill: #eb6834; stroke: #eb6834; }
+  .s3 { fill: #1baf7a; stroke: #1baf7a; }
+  .s4 { fill: #eda100; stroke: #eda100; }
+  .s8 { fill: #e34948; stroke: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .t1, .lab { fill: #f0efec; }
+    .t2, .t3 { fill: #c3c2b7; }
+    .grid { stroke: #3a3935; }
+    .axis { stroke: #77766f; }
+    .ref { stroke: #c3c2b7; }
+    .gap { stroke: #1a1a19; }
+    .s1 { fill: #3987e5; stroke: #3987e5; }
+    .s2 { fill: #d95926; stroke: #d95926; }
+    .s3 { fill: #199e70; stroke: #199e70; }
+    .s4 { fill: #c98500; stroke: #c98500; }
+    .s8 { fill: #e66767; stroke: #e66767; }
+  }
+</style>
+
+<title>Throughput: orders placed per second</title>
+<text x="16.0" y="24.0" class="t1" text-anchor="start">Throughput: orders placed per second</text>
+<text x="16.0" y="42.0" class="t2" text-anchor="start">Mixed workload (4 browse + add + checkout per cycle), 1,000 SKUs</text>
+<line x1="70.0" y1="340.0" x2="590.0" y2="340.0" class="axis"/>
+<text x="64.0" y="344.0" class="t3" text-anchor="end">0</text>
+<line x1="70.0" y1="260.0" x2="590.0" y2="260.0" class="grid"/>
+<text x="64.0" y="264.0" class="t3" text-anchor="end">200</text>
+<line x1="70.0" y1="180.0" x2="590.0" y2="180.0" class="grid"/>
+<text x="64.0" y="184.0" class="t3" text-anchor="end">400</text>
+<line x1="70.0" y1="100.0" x2="590.0" y2="100.0" class="grid"/>
+<text x="64.0" y="104.0" class="t3" text-anchor="end">600</text>
+<text x="70.0" y="92.0" class="t2" text-anchor="start">orders per second</text>
+<text x="122.0" y="356.0" class="t3" text-anchor="middle">50</text>
+<text x="226.0" y="356.0" class="t3" text-anchor="middle">100</text>
+<text x="330.0" y="356.0" class="t3" text-anchor="middle">250</text>
+<text x="434.0" y="356.0" class="t3" text-anchor="middle">500</text>
+<text x="538.0" y="356.0" class="t3" text-anchor="middle">1000</text>
+<text x="330.0" y="374.0" class="t2" text-anchor="middle">concurrent clients</text>
+<path d="M122.0,151.4 L226.0,151.2 L330.0,157.2 L434.0,165.6 L538.0,141.8" class="s1" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="122.0" cy="151.4" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive, 50 clients: 471 orders/s</title></circle>
+<circle cx="226.0" cy="151.2" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive, 100 clients: 472 orders/s</title></circle>
+<circle cx="330.0" cy="157.2" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive, 250 clients: 457 orders/s</title></circle>
+<circle cx="434.0" cy="165.6" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive, 500 clients: 436 orders/s</title></circle>
+<circle cx="538.0" cy="141.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive, 1000 clients: 496 orders/s</title></circle>
+<path d="M122.0,168.8 L226.0,153.8 L330.0,162.4 L434.0,160.6 L538.0,141.3" class="s2" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="122.0" cy="168.8" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock, 50 clients: 428 orders/s</title></circle>
+<circle cx="226.0" cy="153.8" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock, 100 clients: 466 orders/s</title></circle>
+<circle cx="330.0" cy="162.4" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock, 250 clients: 444 orders/s</title></circle>
+<circle cx="434.0" cy="160.6" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock, 500 clients: 448 orders/s</title></circle>
+<circle cx="538.0" cy="141.3" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock, 1000 clients: 497 orders/s</title></circle>
+<path d="M122.0,196.2 L226.0,187.7 L330.0,187.9 L434.0,189.4 L538.0,169.0" class="s3" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="122.0" cy="196.2" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm, 50 clients: 359 orders/s</title></circle>
+<circle cx="226.0" cy="187.7" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm, 100 clients: 381 orders/s</title></circle>
+<circle cx="330.0" cy="187.9" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm, 250 clients: 380 orders/s</title></circle>
+<circle cx="434.0" cy="189.4" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm, 500 clients: 376 orders/s</title></circle>
+<circle cx="538.0" cy="169.0" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm, 1000 clients: 428 orders/s</title></circle>
+<text x="546.0" y="145.3" class="lab" text-anchor="start">db-lock</text>
+<text x="546.0" y="158.3" class="lab" text-anchor="start">naive</text>
+<text x="546.0" y="173.0" class="lab" text-anchor="start">lockfree-shm</text>
+<rect x="70.0" y="54.0" width="12" height="12" rx="3" class="s1"/>
+<text x="87.0" y="64.0" class="t2" text-anchor="start">naive</text>
+<rect x="135.0" y="54.0" width="12" height="12" rx="3" class="s2"/>
+<text x="152.0" y="64.0" class="t2" text-anchor="start">db-lock</text>
+<rect x="214.0" y="54.0" width="12" height="12" rx="3" class="s3"/>
+<text x="231.0" y="64.0" class="t2" text-anchor="start">lockfree-shm</text>
+</svg>

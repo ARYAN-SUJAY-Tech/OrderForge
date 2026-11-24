@@ -1,0 +1,14 @@
+date:        2026-11-24T23:25:09+05:30
+host cpu:    13th Gen Intel(R) Core(TM) i5-1335U
+cpus:        12 logical (10 cores per socket, 2 threads per core)
+max clock:   4600.0000 MHz
+memory:      15Gi
+kernel:      Linux 7.0.0-43-generic
+os:          Ubuntu 24.04.5 LTS
+mysql:       server 8.0.46-0ubuntu0.24.04.5, innodb_buffer_pool_size 128 MiB, flush_log_at_trx_commit 1
+apache:      Server version: Apache/2.4.58 (Ubuntu)
+compiler:    cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+build:       build/release
+commit:      a27534e (with local changes)
+config:      core.workers , core.queue_size , api.workers 16, core.payment_workers , core.wal_group_us  (blank = built-in default)
+power:       on mains: 0, governor: powersave, profile: 

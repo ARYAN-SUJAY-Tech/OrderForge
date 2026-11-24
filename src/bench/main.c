@@ -1,7 +1,11 @@
 /*
  * of-bench - load generator and invariant checker.
  *
- *   of-bench [-c config] oversell [options]
+ *   of-bench [-c config] oversell [options]   headline experiment 1 (below)
+ *   of-bench [-c config] mix [options]        throughput, latency, hot vs spread SKUs
+ *   of-bench [-c config] seed [options]       create the BENCH-* catalogue for 'mix'
+ *   of-bench [-c config] load [options]       sustained shopping for the chaos test
+ *   of-bench [-c config] inject ORDER_ID      attack the payment reply queue
  *
  * The oversell experiment: STOCK units of one product, BUYERS customers who each have
  * that product in their cart, and every checkout fired at the same instant.
@@ -83,6 +87,9 @@ static void usage(void)
             "                [--csv FILE]        (admin password: $OF_ADMIN_PASSWORD)\n"
             "       of-bench [-c config] load [--clients N] [--duration S] [--restock N]\n"
             "                [--method tok_success] [--url http://host:port] [--csv FILE]\n"
+            "       of-bench [-c config] mix [--clients N] [--duration S] [--warmup S]\n"
+            "                [--browse N] [--skus spread|hot] [--label L] [--url URL] [--csv FILE]\n"
+            "       of-bench [-c config] seed [--skus N] [--stock S]   (of-core must be stopped)\n"
             "       of-bench [-c config] inject ORDER_ID   (forged/stale/replayed payment replies)\n");
     exit(2);
 }
@@ -978,6 +985,451 @@ static int cmd_load(int argc, char **argv)
     return pass ? 0 : 1;
 }
 
+/* ------------------------------------------------------------------ bench catalogue */
+/*
+ * of-bench seed --skus N --stock S: creates N products BENCH-0001..BENCH-N (or tops up
+ * existing ones) with S units each, straight in MySQL, with an 'initial' or 'restock'
+ * ledger row so the stock-balance invariant holds. of-core must be STOPPED: it loads
+ * stock into shared memory when it starts, and would not see rows added behind its back.
+ */
+static int cmd_seed(int argc, char **argv)
+{
+    int64_t skus = 1000, stock_units = 1000000;
+    for (int i = 0; i + 1 < argc; i += 2) {
+        if (strcmp(argv[i], "--skus") == 0 && of_parse_i64(argv[i + 1], 1, 100000, &skus) == 0)
+            ;
+        else if (strcmp(argv[i], "--stock") == 0 &&
+                 of_parse_i64(argv[i + 1], 0, 100000000, &stock_units) == 0)
+            ;
+        else
+            usage();
+    }
+    if (argc % 2)
+        usage();
+    char err[256];
+    db_t *db = db_connect(&cfg, err, sizeof err);
+    if (!db) {
+        fprintf(stderr, "of-bench: database: %s\n", err);
+        return 1;
+    }
+    int64_t cat = 0;
+    if (db_query_int(db, &cat, "SELECT MIN(id) FROM categories", "") < 0 || cat <= 0) {
+        fprintf(stderr, "of-bench: no categories (load the schema and seed first)\n");
+        return 1;
+    }
+    int64_t created = 0, topped = 0;
+    if (db_begin(db) != 0)
+        return 1;
+    for (int64_t i = 1; i <= skus; i++) {
+        char sku[32], name[64];
+        snprintf(sku, sizeof sku, "BENCH-%04lld", (long long)i);
+        snprintf(name, sizeof name, "Benchmark item %lld", (long long)i);
+        int64_t id = 0, have = 0;
+        if (db_query_int(db, &id, "SELECT id FROM products WHERE sku = ?", "s", sku) < 0)
+            goto fail;
+        if (id == 0) {
+            if (db_exec(db,
+                        "INSERT INTO products (sku, name, description, price_paise, category_id) "
+                        "VALUES (?, ?, 'Synthetic product used by of-bench.', ?, ?)",
+                        "ssii", sku, name, (int64_t)(10000 + i % 90 * 1000), cat) != 1)
+                goto fail;
+            id = (int64_t)db_insert_id(db);
+            if (db_exec(db, "INSERT INTO inventory (product_id, stock_on_hand) VALUES (?, ?)",
+                        "ii", id, stock_units) != 1 ||
+                db_exec(db,
+                        "INSERT INTO stock_movements (product_id, delta, reason, actor) "
+                        "VALUES (?, ?, 'initial', 'of-bench seed')",
+                        "ii", id, stock_units) != 1)
+                goto fail;
+            created++;
+        } else {
+            if (db_query_int(db, &have, "SELECT stock_on_hand FROM inventory WHERE product_id = ?",
+                             "i", id) < 0)
+                goto fail;
+            if (have < stock_units) {
+                if (db_exec(db, "UPDATE inventory SET stock_on_hand = ? WHERE product_id = ?",
+                            "ii", stock_units, id) != 1 ||
+                    db_exec(db,
+                            "INSERT INTO stock_movements (product_id, delta, reason, actor) "
+                            "VALUES (?, ?, 'restock', 'of-bench seed')",
+                            "ii", id, stock_units - have) != 1)
+                    goto fail;
+                topped++;
+            }
+            db_exec(db, "UPDATE products SET active = 1 WHERE id = ?", "i", id);
+        }
+        if (i % 500 == 0 && (db_commit(db) != 0 || db_begin(db) != 0))
+            goto fail;
+    }
+    if (db_commit(db) != 0)
+        goto fail;
+    printf("of-bench seed: %lld benchmark SKUs (%lld created, %lld topped up to %lld units)\n",
+           (long long)skus, (long long)created, (long long)topped, (long long)stock_units);
+    db_close(db);
+    return 0;
+fail:
+    fprintf(stderr, "of-bench seed: %s\n", db_error(db));
+    db_rollback(db);
+    db_close(db);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ mixed workload */
+/*
+ * of-bench mix: CLIENTS closed-loop customers for DURATION seconds. Each one repeats a
+ * shopping cycle: BROWSE catalogue reads (alternating a product page and a list page),
+ * then add one item to the cart, then check out. With --browse 0 every cycle is
+ * add + checkout, which is the contention workload.
+ *
+ *   --skus spread   items picked at random from all BENCH-* products (default)
+ *   --skus hot      every item is BENCH-0001: all clients fight over one SKU
+ *
+ * Every request is timed from connect() to the last byte. Requests that finish during
+ * the warm-up are not counted. Results: throughput (requests and orders per second),
+ * p50/p95/p99/max latency per operation, and every non-2xx answer by class. The run
+ * then waits for payments to settle and checks every invariant; --csv appends a row.
+ */
+enum { OP_BROWSE, OP_ADD, OP_CHECKOUT, OP_N };
+static const char *const op_name[OP_N] = {"browse", "add", "checkout"};
+
+typedef struct {
+    int64_t *v;
+    size_t   n, cap;
+} lat_t;
+
+typedef struct {
+    int      idx;
+    lat_t    lat[OP_N];
+    uint64_t ok[OP_N], busy, limited, err5xx, err4xx, neterr, soldout, created;
+} mix_client_t;
+
+static int64_t *mix_products;
+static int      mix_nproducts;
+static bool     mix_hot;
+static int      mix_browse = 4;
+static int64_t  mix_t_count, mix_t_end; /* count requests finishing in [count, end) */
+
+static void lat_add(lat_t *l, int64_t us)
+{
+    if (l->n == l->cap) {
+        size_t cap = l->cap ? l->cap * 2 : 1024;
+        int64_t *p = realloc(l->v, cap * sizeof *p);
+        if (!p)
+            return;
+        l->v = p;
+        l->cap = cap;
+    }
+    l->v[l->n++] = us;
+}
+
+/* Times one request and files the result; returns the HTTP status (0 on network error). */
+static int mix_req(mix_client_t *c, int op, const char *method, const char *path,
+                   const char *body, const char *idem, http_resp_t *r)
+{
+    buyer_t *b = &buyers[c->idx];
+    int64_t t0 = of_now_us();
+    int rc = http_call_idem(method, path, body, b->token, op == OP_BROWSE ? NULL : b->csrf, idem, r);
+    int64_t t1 = of_now_us();
+    if (t1 < mix_t_count || t1 >= mix_t_end)
+        return rc == 0 ? r->status : 0;
+    if (rc != 0) {
+        c->neterr++;
+        return 0;
+    }
+    if (r->status >= 200 && r->status < 300) {
+        c->ok[op]++;
+        lat_add(&c->lat[op], t1 - t0);
+    } else if (r->status == 503) {
+        c->busy++;
+    } else if (r->status == 429) {
+        c->limited++;
+    } else if (r->status == 409 && op == OP_CHECKOUT && !strstr(r->body, "\"conflict\"")) {
+        c->soldout++;
+    } else if (r->status >= 500) {
+        c->err5xx++;
+    } else {
+        c->err4xx++;
+    }
+    return r->status;
+}
+
+static void *mix_client(void *arg)
+{
+    mix_client_t *c = arg;
+    unsigned seed = (unsigned)(c->idx * 7919 + 101);
+    http_resp_t *r = malloc(sizeof *r);
+    if (!r)
+        return NULL;
+    char path[96], body[128];
+    while (of_now_us() < mix_t_end) {
+        for (int i = 0; i < mix_browse && of_now_us() < mix_t_end; i++) {
+            if (i % 2 == 0)
+                snprintf(path, sizeof path, "/api/products/%lld",
+                         (long long)mix_products[rand_r(&seed) % mix_nproducts]);
+            else
+                snprintf(path, sizeof path, "/api/products?page=%d&per_page=20",
+                         1 + rand_r(&seed) % 10);
+            mix_req(c, OP_BROWSE, "GET", path, NULL, NULL, r);
+        }
+        int64_t pid = mix_hot ? mix_products[0] : mix_products[rand_r(&seed) % mix_nproducts];
+        snprintf(body, sizeof body, "{\"product_id\":%lld,\"qty\":1}", (long long)pid);
+        if (mix_req(c, OP_ADD, "POST", "/api/cart/items", body, NULL, r) != 200) {
+            pause_ms(5);
+            continue;
+        }
+        unsigned char rnd[16];
+        char key[33];
+        of_random_bytes(rnd, sizeof rnd);
+        of_hex(key, rnd, sizeof rnd);
+        snprintf(body, sizeof body, "{\"payment_method\":\"%s\"}", load_method);
+        int st = mix_req(c, OP_CHECKOUT, "POST", "/api/checkout", body, key, r);
+        if (st == 201) {
+            c->created++;
+        } else {
+            /* Not placed (busy, sold out, error): empty the cart for the next cycle. */
+            snprintf(path, sizeof path, "/api/cart/items/%lld", (long long)pid);
+            http_call("DELETE", path, NULL, buyers[c->idx].token, buyers[c->idx].csrf, r);
+            if (st == 503 || st == 0)
+                pause_ms(5);
+        }
+    }
+    free(r);
+    return NULL;
+}
+
+static double pct_ms(const lat_t *l, int p)
+{
+    if (l->n == 0)
+        return 0;
+    size_t i = l->n * (size_t)p / 100;
+    if (i >= l->n)
+        i = l->n - 1;
+    return l->v[i] / 1000.0;
+}
+
+static int cmd_mix(int argc, char **argv)
+{
+    int clients = 50, duration = 20, warmup = 3;
+    const char *csv = NULL, *label = "mix";
+    for (int i = 0; i + 1 < argc; i += 2) {
+        int64_t n;
+        const char *a = argv[i], *v = argv[i + 1];
+        if (strcmp(a, "--clients") == 0 && of_parse_i64(v, 1, 5000, &n) == 0)
+            clients = (int)n;
+        else if (strcmp(a, "--duration") == 0 && of_parse_i64(v, 1, 3600, &n) == 0)
+            duration = (int)n;
+        else if (strcmp(a, "--warmup") == 0 && of_parse_i64(v, 0, 600, &n) == 0)
+            warmup = (int)n;
+        else if (strcmp(a, "--browse") == 0 && of_parse_i64(v, 0, 100, &n) == 0)
+            mix_browse = (int)n;
+        else if (strcmp(a, "--skus") == 0 && (strcmp(v, "hot") == 0 || strcmp(v, "spread") == 0))
+            mix_hot = strcmp(v, "hot") == 0;
+        else if (strcmp(a, "--method") == 0)
+            load_method = v;
+        else if (strcmp(a, "--label") == 0)
+            label = v;
+        else if (strcmp(a, "--url") == 0 && parse_url(v) == 0)
+            ;
+        else if (strcmp(a, "--csv") == 0)
+            csv = v;
+        else
+            usage();
+    }
+    if (argc % 2)
+        usage();
+    o.buyers = clients;
+    if (sodium_init() < 0 || resolve() != 0)
+        return 1;
+
+    char err[256];
+    db_t *db = db_connect(&cfg, err, sizeof err);
+    if (!db) {
+        fprintf(stderr, "of-bench: database: %s\n", err);
+        return 1;
+    }
+
+    /* Mode and TTL from the admin API (also proves the stack is up). */
+    http_resp_t r;
+    char body[512], mode[32] = "?", ttl_s[16] = "120";
+    o.admin_password = getenv("OF_ADMIN_PASSWORD") ? getenv("OF_ADMIN_PASSWORD") : "admin12345";
+    snprintf(body, sizeof body, "{\"email\":\"%s\",\"password\":\"%s\"}", o.admin_email,
+             o.admin_password);
+    if (http_call("POST", "/api/auth/login", body, NULL, NULL, &r) != 0 || r.status != 200) {
+        fprintf(stderr, "of-bench: admin login failed (is the stack running?)\n");
+        return 1;
+    }
+    char admin_cookie[160];
+    snprintf(admin_cookie, sizeof admin_cookie, "%s", r.cookie);
+    if (http_call("GET", "/api/admin/system", NULL, admin_cookie, NULL, &r) == 0 && r.status == 200) {
+        json_find(r.body, "stock_mode", mode, sizeof mode);
+        json_find(r.body, "reservation_ttl_s", ttl_s, sizeof ttl_s);
+    }
+
+    db_res_t res;
+    if (db_query(db, &res,
+                 "SELECT id FROM products WHERE sku LIKE 'BENCH-%' AND active = 1 ORDER BY id",
+                 "") != 0)
+        return 1;
+    mix_products = calloc(100000, sizeof *mix_products);
+    while (mix_nproducts < 100000 && db_fetch(&res) == 1)
+        mix_products[mix_nproducts++] = db_int(&res, 0);
+    db_res_free(&res);
+    if (mix_nproducts == 0) {
+        fprintf(stderr, "of-bench: no BENCH-* products: stop of-core, run 'of-bench seed', "
+                        "start it again\n");
+        return 1;
+    }
+
+    char run_id[24];
+    snprintf(run_id, sizeof run_id, "M%lld", (long long)of_now_us());
+    buyers = calloc((size_t)clients, sizeof *buyers);
+    if (create_buyers(db, run_id, false) != 0) {
+        fprintf(stderr, "of-bench: creating buyers: %s\n", db_error(db));
+        return 1;
+    }
+    printf("of-bench mix: mode %s, %d clients, %d s (+%d s warm-up), %s over %d SKU%s, "
+           "%d browse + add + checkout per cycle\n",
+           mode, clients, duration, warmup, mix_hot ? "hot SKU" : "spread",
+           mix_hot ? 1 : mix_nproducts, mix_hot ? "" : "s", mix_browse);
+    fflush(stdout);
+
+    int64_t start = of_now_us();
+    mix_t_count = start + (int64_t)warmup * 1000000;
+    mix_t_end = mix_t_count + (int64_t)duration * 1000000;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256 * 1024);
+    pthread_t *th = calloc((size_t)clients, sizeof *th);
+    mix_client_t *cl = calloc((size_t)clients, sizeof *cl);
+    int started = 0;
+    for (int i = 0; i < clients; i++) {
+        cl[i].idx = i;
+        if (pthread_create(&th[i], &attr, mix_client, &cl[i]) != 0) {
+            fprintf(stderr, "of-bench: could only start %d client threads\n", i);
+            break;
+        }
+        started++;
+    }
+    pthread_attr_destroy(&attr);
+    for (int i = 0; i < started; i++)
+        pthread_join(th[i], NULL);
+
+    /* Merge. */
+    lat_t all[OP_N] = {0}, every = {0};
+    uint64_t busy = 0, limited = 0, e5 = 0, e4 = 0, net = 0, sold = 0, created = 0;
+    for (int i = 0; i < started; i++) {
+        for (int op = 0; op < OP_N; op++)
+            for (size_t j = 0; j < cl[i].lat[op].n; j++) {
+                lat_add(&all[op], cl[i].lat[op].v[j]);
+                lat_add(&every, cl[i].lat[op].v[j]);
+            }
+        busy += cl[i].busy;
+        limited += cl[i].limited;
+        e5 += cl[i].err5xx;
+        e4 += cl[i].err4xx;
+        net += cl[i].neterr;
+        sold += cl[i].soldout;
+        created += cl[i].created;
+    }
+    for (int op = 0; op < OP_N; op++)
+        qsort(all[op].v, all[op].n, sizeof(int64_t), cmp_i64);
+    qsort(every.v, every.n, sizeof(int64_t), cmp_i64);
+    uint64_t failed = busy + limited + e5 + e4 + net + sold;
+    double rps = (double)every.n / duration, ops = (double)created / duration;
+
+    printf("\n  throughput   %.1f requests/s ok, %.1f orders/s  (%zu ok, %llu not ok)\n", rps, ops,
+           every.n, (unsigned long long)failed);
+    printf("  latency ms   %-9s %8s %8s %8s %8s %8s\n", "", "count", "p50", "p95", "p99", "max");
+    for (int op = 0; op < OP_N; op++)
+        printf("               %-9s %8zu %8.1f %8.1f %8.1f %8.1f\n", op_name[op], all[op].n,
+               pct_ms(&all[op], 50), pct_ms(&all[op], 95), pct_ms(&all[op], 99),
+               pct_ms(&all[op], 100));
+    printf("               %-9s %8zu %8.1f %8.1f %8.1f %8.1f\n", "all", every.n, pct_ms(&every, 50),
+           pct_ms(&every, 95), pct_ms(&every, 99), pct_ms(&every, 100));
+    printf("  not ok       busy 503: %llu, rate-limited 429: %llu, other 5xx: %llu, other 4xx: "
+           "%llu, network: %llu, sold out: %llu\n",
+           (unsigned long long)busy, (unsigned long long)limited, (unsigned long long)e5,
+           (unsigned long long)e4, (unsigned long long)net, (unsigned long long)sold);
+
+    /* Settle payments, then check invariants (as in 'load'). */
+    char like[64];
+    snprintf(like, sizeof like, "bench-%s-%%", run_id);
+    int64_t wait_until = of_now_us() + (atoll(ttl_s) + 15) * 1000000LL, pending = 0;
+    printf("  waiting for payments to settle...");
+    fflush(stdout);
+    do {
+        if (db_query_int(db, &pending,
+                         "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.user_id "
+                         "WHERE u.email LIKE ? AND o.status IN ('placed', 'payment_pending')",
+                         "s", like) < 0)
+            break;
+        if (pending)
+            pause_ms(500);
+    } while (pending && of_now_us() < wait_until);
+    printf(" %s\n", pending ? "timed out" : "done");
+
+    stock_table_t t;
+    const stock_table_t *tp = NULL;
+    if (strcmp(mode, "lockfree-shm") == 0 &&
+        stock_attach(&t, of_config_get(&cfg, "core.shm_name", "/orderforge")) == 0)
+        tp = &t;
+    buf_t inv;
+    buf_init(&inv);
+    int64_t oversold = 0;
+    int bad = store_check_invariants(db, tp, &inv, &oversold);
+    int bad_orders = bad < 0 ? -1 : store_check_orders(db, &inv, 30);
+    bool pass = bad == 0 && bad_orders == 0 && oversold == 0;
+    if (!pass && inv.data)
+        for (char *line = strtok(inv.data, "\n"); line; line = strtok(NULL, "\n"))
+            if (strncmp(line, "ok", 2) != 0)
+                printf("    %s\n", line);
+    printf("  invariants   %s\n", pass ? "PASS" : "FAIL (see above)");
+
+    if (csv) {
+        FILE *f = fopen(csv, "a");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            if (ftell(f) == 0)
+                fprintf(f, "label,mode,skus,clients,browse,duration_s,ok_requests,req_per_s,"
+                           "orders,orders_per_s,browse_p50_ms,browse_p95_ms,browse_p99_ms,"
+                           "add_p50_ms,add_p95_ms,add_p99_ms,checkout_p50_ms,checkout_p95_ms,"
+                           "checkout_p99_ms,checkout_max_ms,all_p50_ms,all_p95_ms,all_p99_ms,"
+                           "busy_503,limited_429,other_5xx,other_4xx,network,sold_out,"
+                           "invariants_pass\n");
+            fprintf(f,
+                    "%s,%s,%s,%d,%d,%d,%zu,%.1f,%llu,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,"
+                    "%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%llu,%llu,%llu,%llu,%llu,%llu,%d\n",
+                    label, mode, mix_hot ? "hot" : "spread", clients, mix_browse, duration,
+                    every.n, rps, (unsigned long long)created, ops, pct_ms(&all[0], 50),
+                    pct_ms(&all[0], 95), pct_ms(&all[0], 99), pct_ms(&all[1], 50),
+                    pct_ms(&all[1], 95), pct_ms(&all[1], 99), pct_ms(&all[2], 50),
+                    pct_ms(&all[2], 95), pct_ms(&all[2], 99), pct_ms(&all[2], 100),
+                    pct_ms(&every, 50), pct_ms(&every, 95), pct_ms(&every, 99),
+                    (unsigned long long)busy, (unsigned long long)limited, (unsigned long long)e5,
+                    (unsigned long long)e4, (unsigned long long)net, (unsigned long long)sold,
+                    pass);
+            fclose(f);
+        }
+    }
+
+    buf_free(&inv);
+    if (tp)
+        stock_close(&t, false);
+    for (int i = 0; i < started; i++)
+        for (int op = 0; op < OP_N; op++)
+            free(cl[i].lat[op].v);
+    for (int op = 0; op < OP_N; op++)
+        free(all[op].v);
+    free(every.v);
+    free(cl);
+    free(th);
+    free(buyers);
+    free(mix_products);
+    db_close(db);
+    freeaddrinfo(server);
+    return pass ? 0 : 1;
+}
+
 /* ------------------------------------------------------------------ message injection */
 /*
  * of-bench inject ORDER_ID: attack the payment channel directly, the way a hostile
@@ -1089,6 +1541,10 @@ int main(int argc, char **argv)
         return cmd_oversell(argc - optind - 1, argv + optind + 1);
     if (strcmp(argv[optind], "load") == 0)
         return cmd_load(argc - optind - 1, argv + optind + 1);
+    if (strcmp(argv[optind], "mix") == 0)
+        return cmd_mix(argc - optind - 1, argv + optind + 1);
+    if (strcmp(argv[optind], "seed") == 0)
+        return cmd_seed(argc - optind - 1, argv + optind + 1);
     if (strcmp(argv[optind], "inject") == 0)
         return cmd_inject(argc - optind - 1, argv + optind + 1);
     usage();

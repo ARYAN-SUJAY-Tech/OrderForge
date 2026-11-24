@@ -1,0 +1,1143 @@
+benchmarks -> bench-results/run-20261124-232509  (experiments: oversell throughput contention recovery backpressure)
+date:        2026-11-24T23:25:09+05:30
+host cpu:    13th Gen Intel(R) Core(TM) i5-1335U
+cpus:        12 logical (10 cores per socket, 2 threads per core)
+max clock:   4600.0000 MHz
+memory:      15Gi
+kernel:      Linux 7.0.0-43-generic
+os:          Ubuntu 24.04.5 LTS
+mysql:       server 8.0.46-0ubuntu0.24.04.5, innodb_buffer_pool_size 128 MiB, flush_log_at_trx_commit 1
+apache:      Server version: Apache/2.4.58 (Ubuntu)
+compiler:    cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+build:       build/release
+commit:      a27534e (with local changes)
+config:      core.workers , core.queue_size , api.workers 16, core.payment_workers , core.wal_group_us  (blank = built-in default)
+power:       on mains: 0, governor: powersave, profile: 
+
+================ 1. oversell: 1000 buyers, 50 units, 3 runs per mode
+-- naive, run 1
+of-bench oversell: mode naive, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    592
+    sold out (409)           408
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       592   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 542
+    latency ms  p50 2346.2  p95 3009.8  p99 3037.1  max 3316.9   wall 3319 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    HOT-001           0     -542      592       -1       -1  ledger-mismatch(oversold)
+    1 of 24 products FAIL; 542 units oversold
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  FAIL: see above
+-- naive, run 2
+of-bench oversell: mode naive, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    587
+    sold out (409)           413
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       587   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 537
+    latency ms  p50 2325.0  p95 3333.2  p99 3375.8  max 3383.5   wall 3386 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    HOT-001           0     -537      587       -1       -1  ledger-mismatch(oversold)
+    1 of 24 products FAIL; 537 units oversold
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  FAIL: see above
+-- naive, run 3
+of-bench oversell: mode naive, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    588
+    sold out (409)           412
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       588   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 538
+    latency ms  p50 2281.4  p95 2929.0  p99 2954.8  max 2961.1   wall 2963 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    HOT-001           0     -538      588       -1       -1  ledger-mismatch(oversold)
+    1 of 24 products FAIL; 538 units oversold
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  FAIL: see above
+-- db-lock, run 1
+of-bench oversell: mode db-lock, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 764.6  p95 1267.6  p99 1297.7  max 1302.9   wall 1305 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+-- db-lock, run 2
+of-bench oversell: mode db-lock, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 627.2  p95 993.1  p99 1025.9  max 1030.5   wall 1031 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+-- db-lock, run 3
+of-bench oversell: mode db-lock, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 633.6  p95 1014.9  p99 1046.2  max 1051.7   wall 1055 ms
+
+  invariants (MySQL)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+-- lockfree-shm, run 1
+of-bench oversell: mode lockfree-shm, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 446.8  p95 513.1  p99 830.8  max 832.2   wall 835 ms
+
+  invariants (MySQL + shared memory)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+-- lockfree-shm, run 2
+of-bench oversell: mode lockfree-shm, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 350.1  p95 501.3  p99 507.2  max 508.1   wall 512 ms
+
+  invariants (MySQL + shared memory)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+-- lockfree-shm, run 3
+of-bench oversell: mode lockfree-shm, 1000 buyers x 1 unit of product 1, stock 50, 8 threads
+  setting up buyers, sessions and carts...
+  connecting 1000 sockets, then all checkouts at once
+
+  results
+    orders accepted (201)    50
+    sold out (409)           950
+    busy (503)               0
+    other / no answer        0 / 0   (connect failures 0)
+    units sold (MySQL)       50   expected 50
+    stock_on_hand after      0
+    OVERSOLD                 0
+    latency ms  p50 405.5  p95 489.7  p99 495.0  max 495.9   wall 499 ms
+
+  invariants (MySQL + shared memory)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: sold exactly the available stock, all invariants hold
+
+================ 2. throughput and latency: clients 50 100 250 500 1000, 15 s each
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- naive, 50 clients
+of-bench mix: mode naive, 50 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2366.1 requests/s ok, 471.4 orders/s  (35492 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       23676     16.6     26.4     38.2     93.0
+               add           5911     23.9     36.3     51.9    101.7
+               checkout      5905     28.9     47.4     73.3    111.7
+               all          35492     19.2     35.6     53.2    111.7
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0013   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0021   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0044   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0054   999987   999986       14       -1       -1  ledger-mismatch
+    BENCH-0101   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0132   999994   999993        7       -1       -1  ledger-mismatch
+    BENCH-0141   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0192   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0246   999997   999996        4       -1       -1  ledger-mismatch
+    BENCH-0253   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0260   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0312   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0365   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0392   999994   999993        7       -1       -1  ledger-mismatch
+    BENCH-0419   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0424   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0455   999997   999996        4       -1       -1  ledger-mismatch
+    BENCH-0467   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0589   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0653   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0664   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0691   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0744   999992   999990       10       -1       -1  ledger-mismatch
+    BENCH-0770   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0772   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0794   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0832   999994   999993        7       -1       -1  ledger-mismatch
+    BENCH-0995   999995   999994        6       -1       -1  ledger-mismatch
+    BENCH-0997   999992   999991        9       -1       -1  ledger-mismatch
+    29 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+-- naive, 100 clients
+of-bench mix: mode naive, 100 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2346.7 requests/s ok, 472.1 orders/s  (35201 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       23480     35.1     58.2     98.1    150.8
+               add           5849     44.0     76.3    121.0    158.9
+               checkout      5872     51.5     93.1    132.0    169.5
+               all          35201     39.2     69.2    112.7    169.5
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0007   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0013   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0021   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0044   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0054   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0101   999981   999979       21       -1       -1  ledger-mismatch
+    BENCH-0103   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0131   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0132   999988   999986       14       -1       -1  ledger-mismatch
+    BENCH-0141   999987   999986       14       -1       -1  ledger-mismatch
+    BENCH-0192   999980   999979       21       -1       -1  ledger-mismatch
+    BENCH-0246   999996   999995        5       -1       -1  ledger-mismatch
+    BENCH-0253   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0260   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0286   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0312   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0356   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0360   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0365   999988   999987       13       -1       -1  ledger-mismatch
+    BENCH-0383   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0392   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0404   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0419   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0424   999983   999981       19       -1       -1  ledger-mismatch
+    BENCH-0446   999987   999986       14       -1       -1  ledger-mismatch
+    BENCH-0455   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0467   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0500   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0561   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0589   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0653   999987   999985       15       -1       -1  ledger-mismatch
+    BENCH-0664   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0680   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0691   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0712   999988   999987       13       -1       -1  ledger-mismatch
+    BENCH-0742   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0743   999980   999979       21       -1       -1  ledger-mismatch
+    BENCH-0744   999982   999980       20       -1       -1  ledger-mismatch
+    BENCH-0770   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0772   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0794   999987   999986       14       -1       -1  ledger-mismatch
+    BENCH-0820   999988   999987       13       -1       -1  ledger-mismatch
+    BENCH-0822   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0832   999987   999986       14       -1       -1  ledger-mismatch
+    BENCH-0872   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0898   999988   999987       13       -1       -1  ledger-mismatch
+    BENCH-0969   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0995   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0997   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0999   999993   999992        8       -1       -1  ledger-mismatch
+    50 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+-- naive, 250 clients
+of-bench mix: mode naive, 250 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2238.8 requests/s ok, 457.1 orders/s  (33582 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       22316     79.3    181.6    215.1    254.5
+               add           5660    112.8    182.2    208.3    258.8
+               checkout      5606    160.7    201.6    229.2    274.4
+               all          33582     95.6    189.2    216.7    274.4
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0007   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0013   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0021   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0044   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0054   999964   999963       37       -1       -1  ledger-mismatch
+    BENCH-0101   999970   999968       32       -1       -1  ledger-mismatch
+    BENCH-0103   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0131   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0132   999984   999982       18       -1       -1  ledger-mismatch
+    BENCH-0141   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0192   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0246   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0253   999980   999979       21       -1       -1  ledger-mismatch
+    BENCH-0260   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0286   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0312   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0356   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0360   999980   999979       21       -1       -1  ledger-mismatch
+    BENCH-0365   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0383   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0392   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0397   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0404   999977   999975       25       -1       -1  ledger-mismatch
+    BENCH-0419   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0424   999977   999975       25       -1       -1  ledger-mismatch
+    BENCH-0446   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0455   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0467   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0500   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0556   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0561   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0564   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0589   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0653   999985   999983       17       -1       -1  ledger-mismatch
+    BENCH-0664   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0677   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0680   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0691   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0712   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0742   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0743   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0744   999976   999974       26       -1       -1  ledger-mismatch
+    BENCH-0770   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0772   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0794   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0820   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0822   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0832   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0872   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0898   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0969   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0986   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0995   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0997   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0999   999988   999987       13       -1       -1  ledger-mismatch
+    55 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+-- naive, 500 clients
+of-bench mix: mode naive, 500 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2090.9 requests/s ok, 436.1 orders/s  (31364 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       20904    133.3    438.4    505.4    627.5
+               add           5418    264.3    470.5    541.7    641.5
+               checkout      5042    442.4    600.9    639.5    649.5
+               all          31364    173.5    495.3    588.9    649.5
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0006   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0007   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0013   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0021   999969   999967       33       -1       -1  ledger-mismatch
+    BENCH-0044   999963   999962       38       -1       -1  ledger-mismatch
+    BENCH-0051   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0054   999951   999950       50       -1       -1  ledger-mismatch
+    BENCH-0063   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0092   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0101   999960   999958       42       -1       -1  ledger-mismatch
+    BENCH-0103   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0119   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0131   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0132   999979   999977       23       -1       -1  ledger-mismatch
+    BENCH-0141   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0161   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0181   999960   999959       41       -1       -1  ledger-mismatch
+    BENCH-0185   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0192   999953   999952       48       -1       -1  ledger-mismatch
+    BENCH-0196   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0212   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0246   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0253   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0260   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0261   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0286   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0312   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0317   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0330   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0356   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0357   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0360   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0365   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0373   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0383   999964   999963       37       -1       -1  ledger-mismatch
+    BENCH-0392   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0397   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0404   999972   999970       30       -1       -1  ledger-mismatch
+    BENCH-0419   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0424   999969   999967       33       -1       -1  ledger-mismatch
+    BENCH-0446   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0449   999963   999962       38       -1       -1  ledger-mismatch
+    BENCH-0455   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0467   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0496   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0500   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0517   999983   999982       18       -1       -1  ledger-mismatch
+    BENCH-0548   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0556   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0561   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0564   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0587   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0589   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0611   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0649   999963   999962       38       -1       -1  ledger-mismatch
+    BENCH-0653   999981   999979       21       -1       -1  ledger-mismatch
+    BENCH-0664   999964   999963       37       -1       -1  ledger-mismatch
+    BENCH-0677   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0680   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0691   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0712   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0742   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0743   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0744   999968   999966       34       -1       -1  ledger-mismatch
+    BENCH-0751   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0770   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0772   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0780   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0794   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0820   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0822   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0832   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0871   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0872   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0878   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0898   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0934   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0950   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0957   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0969   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0970   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0973   999978   999977       23       -1       -1  ledger-mismatch
+    BENCH-0986   999981   999980       20       -1       -1  ledger-mismatch
+    BENCH-0988   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0995   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0997   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0999   999982   999981       19       -1       -1  ledger-mismatch
+    87 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+-- naive, 1000 clients
+of-bench mix: mode naive, 1000 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2237.5 requests/s ok, 495.6 orders/s  (33563 ok, 208 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       22490    272.6    511.7   1679.4  15669.9
+               add           5399    283.1    482.5   1465.0   3457.1
+               checkout      5674    322.2    530.0   1562.4   5118.2
+               all          33563    279.8    522.2   1633.2  15669.9
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 208, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0006   999961   999960       40       -1       -1  ledger-mismatch
+    BENCH-0007   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0013   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0021   999962   999960       40       -1       -1  ledger-mismatch
+    BENCH-0044   999958   999957       43       -1       -1  ledger-mismatch
+    BENCH-0051   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0054   999936   999935       65       -1       -1  ledger-mismatch
+    BENCH-0063   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0070   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0092   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0101   999955   999953       47       -1       -1  ledger-mismatch
+    BENCH-0103   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0119   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0131   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0132   999972   999970       30       -1       -1  ledger-mismatch
+    BENCH-0141   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0161   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0181   999951   999950       50       -1       -1  ledger-mismatch
+    BENCH-0185   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0192   999943   999942       58       -1       -1  ledger-mismatch
+    BENCH-0196   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0212   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0246   999975   999974       26       -1       -1  ledger-mismatch
+    BENCH-0247   999961   999960       40       -1       -1  ledger-mismatch
+    BENCH-0253   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0260   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0261   999951   999950       50       -1       -1  ledger-mismatch
+    BENCH-0271   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0286   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0312   999964   999963       37       -1       -1  ledger-mismatch
+    BENCH-0317   999952   999950       50       -1       -1  ledger-mismatch
+    BENCH-0330   999964   999963       37       -1       -1  ledger-mismatch
+    BENCH-0356   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0357   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0360   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0365   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0373   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0383   999953   999952       48       -1       -1  ledger-mismatch
+    BENCH-0392   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0397   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0404   999961   999959       41       -1       -1  ledger-mismatch
+    BENCH-0419   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0424   999959   999957       43       -1       -1  ledger-mismatch
+    BENCH-0440   999951   999950       50       -1       -1  ledger-mismatch
+    BENCH-0446   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0449   999952   999951       49       -1       -1  ledger-mismatch
+    BENCH-0455   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0461   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0467   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0490   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0496   999957   999956       44       -1       -1  ledger-mismatch
+    BENCH-0500   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0504   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0517   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0531   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0541   999966   999965       35       -1       -1  ledger-mismatch
+    BENCH-0548   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0556   999958   999957       43       -1       -1  ledger-mismatch
+    BENCH-0561   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0564   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0587   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0589   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0597   999972   999971       29       -1       -1  ledger-mismatch
+    BENCH-0611   999956   999955       45       -1       -1  ledger-mismatch
+    BENCH-0632   999948   999947       53       -1       -1  ledger-mismatch
+    BENCH-0649   999954   999953       47       -1       -1  ledger-mismatch
+    BENCH-0653   999973   999971       29       -1       -1  ledger-mismatch
+    BENCH-0660   999979   999978       22       -1       -1  ledger-mismatch
+    BENCH-0664   999956   999955       45       -1       -1  ledger-mismatch
+    BENCH-0677   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0680   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0685   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0691   999960   999959       41       -1       -1  ledger-mismatch
+    BENCH-0694   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0712   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0725   999963   999962       38       -1       -1  ledger-mismatch
+    BENCH-0729   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0742   999961   999960       40       -1       -1  ledger-mismatch
+    BENCH-0743   999958   999957       43       -1       -1  ledger-mismatch
+    BENCH-0744   999961   999959       41       -1       -1  ledger-mismatch
+    BENCH-0751   999962   999961       39       -1       -1  ledger-mismatch
+    BENCH-0768   999982   999981       19       -1       -1  ledger-mismatch
+    BENCH-0770   999970   999969       31       -1       -1  ledger-mismatch
+    BENCH-0772   999959   999958       42       -1       -1  ledger-mismatch
+    BENCH-0780   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0787   999967   999966       34       -1       -1  ledger-mismatch
+    BENCH-0794   999960   999959       41       -1       -1  ledger-mismatch
+    BENCH-0820   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0822   999952   999951       49       -1       -1  ledger-mismatch
+    BENCH-0832   999963   999962       38       -1       -1  ledger-mismatch
+    BENCH-0833   999966   999964       36       -1       -1  ledger-mismatch
+    BENCH-0850   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0871   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0872   999955   999954       46       -1       -1  ledger-mismatch
+    BENCH-0878   999976   999975       25       -1       -1  ledger-mismatch
+    BENCH-0898   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0934   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0950   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0951   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0957   999973   999972       28       -1       -1  ledger-mismatch
+    BENCH-0969   999968   999967       33       -1       -1  ledger-mismatch
+    BENCH-0970   999971   999970       30       -1       -1  ledger-mismatch
+    BENCH-0973   999974   999973       27       -1       -1  ledger-mismatch
+    BENCH-0986   999977   999976       24       -1       -1  ledger-mismatch
+    BENCH-0988   999969   999968       32       -1       -1  ledger-mismatch
+    BENCH-0995   999965   999964       36       -1       -1  ledger-mismatch
+    BENCH-0997   999957   999956       44       -1       -1  ledger-mismatch
+    BENCH-0999   999975   999974       26       -1       -1  ledger-mismatch
+    108 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- db-lock, 50 clients
+of-bench mix: mode db-lock, 50 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2181.8 requests/s ok, 428.0 orders/s  (32727 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       21817     17.5     31.0     46.7     85.0
+               add           5453     25.3     42.8     68.4     99.9
+               checkout      5457     30.6     60.5     87.1    121.4
+               all          32727     20.3     40.3     66.4    121.4
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- db-lock, 100 clients
+of-bench mix: mode db-lock, 100 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2312.5 requests/s ok, 465.5 orders/s  (34688 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       23111     35.0     57.7     97.2    170.1
+               add           5785     43.8     82.2    134.7    181.2
+               checkout      5792     53.4    108.9    160.7    190.3
+               all          34688     39.1     72.9    129.4    190.3
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- db-lock, 250 clients
+of-bench mix: mode db-lock, 250 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2149.3 requests/s ok, 443.9 orders/s  (32239 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       21403     74.3    198.9    318.7    392.9
+               add           5427    120.4    205.9    295.4    397.9
+               checkout      5409    189.6    312.7    390.6    406.9
+               all          32239     90.0    221.2    348.9    406.9
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- db-lock, 500 clients
+of-bench mix: mode db-lock, 500 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2125.9 requests/s ok, 448.5 orders/s  (31888 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       21212    134.0    408.0    454.8    551.7
+               add           5448    258.8    451.0    507.7    562.8
+               checkout      5228    411.2    498.6    558.4    573.6
+               all          31888    187.9    450.1    505.8    573.6
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- db-lock, 1000 clients
+of-bench mix: mode db-lock, 1000 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   2239.1 requests/s ok, 496.7 orders/s  (33586 ok, 222 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       22463    263.0    512.2   1695.2  15395.0
+               add           5435    273.8    494.8   1514.3   3107.4
+               checkout      5688    301.3    547.7   1644.3   4759.7
+               all          33586    270.0    529.2   1663.0  15395.0
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 222, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- lockfree-shm, 50 clients
+of-bench mix: mode lockfree-shm, 50 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   1837.9 requests/s ok, 359.4 orders/s  (27568 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       18378     20.7     36.5     49.7     95.5
+               add           4599     28.7     47.2     66.4    104.2
+               checkout      4591     40.4     69.5     95.1    123.8
+               all          27568     24.1     49.2     71.0    123.8
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- lockfree-shm, 100 clients
+of-bench mix: mode lockfree-shm, 100 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   1890.5 requests/s ok, 380.7 orders/s  (28357 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       18881     40.1     85.7    121.0    159.0
+               add           4749     49.4    103.3    134.9    162.7
+               checkout      4727     72.7    129.4    161.1    180.0
+               all          28357     46.0     99.5    136.6    180.0
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- lockfree-shm, 250 clients
+of-bench mix: mode lockfree-shm, 250 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   1858.7 requests/s ok, 380.3 orders/s  (27881 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       18559     82.1    257.9    302.8    397.3
+               add           4653    130.2    263.8    315.4    401.2
+               checkout      4669    220.3    326.0    396.6    426.0
+               all          27881    100.7    276.9    341.6    426.0
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- lockfree-shm, 500 clients
+of-bench mix: mode lockfree-shm, 500 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   1786.9 requests/s ok, 376.4 orders/s  (26804 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       17942    132.4    607.2    693.5    847.0
+               add           4443    262.1    568.3    703.8    860.2
+               checkout      4419    608.1    760.4    843.2    871.8
+               all          26804    180.1    674.9    758.9    871.8
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- lockfree-shm, 1000 clients
+of-bench mix: mode lockfree-shm, 1000 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   1852.6 requests/s ok, 427.6 orders/s  (27789 ok, 228 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse       18422    316.2    649.1   1783.1  16078.6
+               add           4630    324.1    617.0   1559.6   2826.6
+               checkout      4737    379.7    686.4   1605.0   3046.3
+               all          27789    328.5    657.5   1740.7  16078.6
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 228, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+
+================ 3. contention: 200 clients, checkout only, hot vs spread
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- naive, spread
+of-bench mix: mode naive, 200 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 0 browse + add + checkout per cycle
+
+  throughput   919.5 requests/s ok, 537.9 orders/s  (13793 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           6925    200.0    303.8    362.4    393.7
+               checkout      6868    214.9    322.3    381.4    404.7
+               all          13793    207.6    314.3    370.8    404.7
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0019   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0077   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0087   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0140   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0166   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0181   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0294   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0312   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0335   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0374   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0384   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0433   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0462   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0472   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0475   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0499   999996   999995        5       -1       -1  ledger-mismatch
+    BENCH-0603   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0713   999994   999992        8       -1       -1  ledger-mismatch
+    BENCH-0730   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0734   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0765   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0767   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0777   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0786   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0792   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0891   999995   999994        6       -1       -1  ledger-mismatch
+    BENCH-0901   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0921   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0976   999994   999993        7       -1       -1  ledger-mismatch
+    BENCH-0991   999994   999993        7       -1       -1  ledger-mismatch
+    30 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+-- naive, hot
+of-bench mix: mode naive, 200 clients, 15 s (+3 s warm-up), hot SKU over 1 SKU, 0 browse + add + checkout per cycle
+
+  throughput   457.5 requests/s ok, 283.2 orders/s  (6863 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           3421    410.8    596.5    658.8    705.7
+               checkout      3442    444.8    638.6    701.2    751.1
+               all           6863    428.6    612.9    686.7    751.1
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    BENCH-0001   999559   995744     4256       -1       -1  ledger-mismatch
+    BENCH-0019   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0077   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0087   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0140   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0166   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0181   999984   999983       17       -1       -1  ledger-mismatch
+    BENCH-0294   999986   999985       15       -1       -1  ledger-mismatch
+    BENCH-0312   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0335   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0374   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0384   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0433   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0462   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0472   999985   999984       16       -1       -1  ledger-mismatch
+    BENCH-0475   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0499   999996   999995        5       -1       -1  ledger-mismatch
+    BENCH-0603   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0713   999994   999992        8       -1       -1  ledger-mismatch
+    BENCH-0730   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0734   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0765   999991   999990       10       -1       -1  ledger-mismatch
+    BENCH-0767   999989   999988       12       -1       -1  ledger-mismatch
+    BENCH-0777   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0786   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0792   999990   999989       11       -1       -1  ledger-mismatch
+    BENCH-0891   999995   999994        6       -1       -1  ledger-mismatch
+    BENCH-0901   999993   999992        8       -1       -1  ledger-mismatch
+    BENCH-0921   999992   999991        9       -1       -1  ledger-mismatch
+    BENCH-0976   999994   999993        7       -1       -1  ledger-mismatch
+    BENCH-0991   999994   999993        7       -1       -1  ledger-mismatch
+    31 of 1024 products FAIL; 0 units oversold
+  invariants   FAIL (see above)
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- db-lock, spread
+of-bench mix: mode db-lock, 200 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 0 browse + add + checkout per cycle
+
+  throughput   1012.3 requests/s ok, 607.0 orders/s  (15184 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           7591    181.7    244.4    292.6    319.0
+               checkout      7593    206.4    274.0    312.1    369.7
+               all          15184    193.5    262.8    303.8    369.7
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- db-lock, hot
+of-bench mix: mode db-lock, 200 clients, 15 s (+3 s warm-up), hot SKU over 1 SKU, 0 browse + add + checkout per cycle
+
+  throughput   389.0 requests/s ok, 242.1 orders/s  (5835 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           2937    483.9    755.2    886.5    968.0
+               checkout      2898    529.6    853.5    981.1   1017.2
+               all           5835    506.1    805.7    957.5   1017.2
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- lockfree-shm, spread
+of-bench mix: mode lockfree-shm, 200 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 0 browse + add + checkout per cycle
+
+  throughput   784.3 requests/s ok, 480.8 orders/s  (11765 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           5942    248.5    322.1    391.8    432.5
+               checkout      5823    261.0    323.6    388.3    445.4
+               all          11765    254.1    322.8    391.1    445.4
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- lockfree-shm, hot
+of-bench mix: mode lockfree-shm, 200 clients, 15 s (+3 s warm-up), hot SKU over 1 SKU, 0 browse + add + checkout per cycle
+
+  throughput   425.5 requests/s ok, 261.8 orders/s  (6383 ok, 0 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse           0      0.0      0.0      0.0      0.0
+               add           3208    455.3    643.9    768.4    801.5
+               checkout      3175    487.4    698.1    835.7    918.9
+               all           6383    471.3    678.8    796.7    918.9
+  not ok       busy 503: 0, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+
+================ 4. crash recovery: 2 runs x 5 kills under load
+chaos: 100 clients for 72 s, 5 x kill -9 of-core; output in bench-results/chaos-20261124-233856.*
+  kill 1: SIGKILL to of-core pid 249675
+  kill 1: serving again after 945 ms (new of-core pid 249978)
+  kill 2: SIGKILL to of-core pid 249978
+  kill 2: serving again after 997 ms (new of-core pid 250052)
+  kill 3: SIGKILL to of-core pid 250052
+  kill 3: serving again after 948 ms (new of-core pid 250118)
+  kill 4: SIGKILL to of-core pid 250118
+  kill 4: serving again after 945 ms (new of-core pid 250193)
+  kill 5: SIGKILL to of-core pid 250193
+  kill 5: serving again after 892 ms (new of-core pid 250268)
+  waiting for the load run to finish and settle...
+
+of-bench load: mode lockfree-shm, 100 clients, 72 s, 24 products (restocked to 1000), payment tok_success
+
+  results
+    checkouts                25663  (356.4 per second)
+    orders created (201)     23988
+    replayed by key (200)    11   (committed just before a crash; not duplicated)
+    sold out (409)           1664
+    failed attempts retried  212   (502/503/connection errors during an outage)
+    gave up / other          0 / 0
+    checkout latency ms      p50 100.6  p95 164.9  p99 232.3  max 1188.8
+    longest outage           none
+    timeline (ok/failed per second):
+      723/0 831/0 778/0 769/0 710/0 768/0 723/0 733/0 695/0 745/0
+      769/0 202/100 625/0 710/0 753/0 756/0 695/0 771/0 726/0 748/0
+      751/0 676/0 742/0 752/0 168/100 616/0 717/0 761/0 689/0 744/0
+      720/0 787/0 732/0 760/0 726/0 749/0 689/0 199/100 667/0 756/0
+      693/0 765/0 736/0 747/0 727/0 789/0 684/0 824/0 658/0 770/0
+      166/100 694/0 723/0 714/0 743/0 796/0 748/0 797/0 702/0 775/0
+      760/0 804/0 707/0 130/100 689/0 787/0 667/0 884/0 802/0 958/0
+      941/0 1187/0 128/0
+
+  waiting for payments to settle... done
+
+  invariants (MySQL + shared memory + orders)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: every invariant holds
+
+== of-core recovery, from shared-memory metrics
+starts 6, recoveries from a crash 5, last start-up recovery 47 ms
+in-flight reservations resolved: 10 committed, 24 released; reconciliation drift 4 products / 5 units; torn log bytes 0
+
+== invariants
+all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+orders
+ok    no unpaid orders past their reservation deadline
+ok    no unpaid orders with no active reservation (could never expire)
+ok    no paid-or-later orders without exactly one successful payment
+ok    no orders whose timeline is incomplete
+ok    no reservations that disagree with their order's state
+ok    no refunded orders still holding a successful payment
+
+recovery times (ms): 945 997 948 945 892  (target <= 5000)
+load run: PASS, invariants: PASS
+CHAOS PASS
+-- run 1: recovery ms: 945 997 948 945 892    load 1 invariants 1
+chaos: 100 clients for 72 s, 5 x kill -9 of-core; output in bench-results/chaos-20261124-234035.*
+  kill 1: SIGKILL to of-core pid 250493
+  kill 1: serving again after 982 ms (new of-core pid 250792)
+  kill 2: SIGKILL to of-core pid 250792
+  kill 2: serving again after 904 ms (new of-core pid 250876)
+  kill 3: SIGKILL to of-core pid 250876
+  kill 3: serving again after 939 ms (new of-core pid 250949)
+  kill 4: SIGKILL to of-core pid 250949
+  kill 4: serving again after 917 ms (new of-core pid 251026)
+  kill 5: SIGKILL to of-core pid 251026
+  kill 5: serving again after 911 ms (new of-core pid 251094)
+  waiting for the load run to finish and settle...
+
+of-bench load: mode lockfree-shm, 100 clients, 72 s, 24 products (restocked to 1000), payment tok_success
+
+  results
+    checkouts                24305  (337.6 per second)
+    orders created (201)     23849
+    replayed by key (200)    12   (committed just before a crash; not duplicated)
+    sold out (409)           444
+    failed attempts retried  208   (502/503/connection errors during an outage)
+    gave up / other          0 / 0
+    checkout latency ms      p50 102.7  p95 190.9  p99 300.0  max 1172.5
+    longest outage           none
+    timeline (ok/failed per second):
+      712/0 779/0 759/0 758/0 725/0 769/0 716/0 767/0 727/0 737/0
+      746/0 319/100 481/0 775/0 735/0 783/0 666/0 697/0 735/0 742/0
+      670/0 779/0 745/0 758/0 303/100 504/0 783/12 722/0 662/0 791/0
+      611/0 844/0 701/0 830/0 662/0 804/0 502/0 255/100 497/0 767/0
+      629/0 734/0 694/0 769/0 695/0 778/0 677/0 768/0 664/0 758/0
+      224/100 656/0 671/0 801/0 650/0 744/0 676/0 772/0 676/0 795/0
+      662/0 765/0 721/0 188/100 549/0 813/0 651/0 594/0 506/0 631/0
+      559/0 748/0 74/0
+
+  waiting for payments to settle... done
+
+  invariants (MySQL + shared memory + orders)
+    sku         on_hand   ledger     sold   shm_av  shm_res  result
+    all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+    ok    no unpaid orders past their reservation deadline
+    ok    no unpaid orders with no active reservation (could never expire)
+    ok    no paid-or-later orders without exactly one successful payment
+    ok    no orders whose timeline is incomplete
+    ok    no reservations that disagree with their order's state
+    ok    no refunded orders still holding a successful payment
+
+  PASS: every invariant holds
+
+== of-core recovery, from shared-memory metrics
+starts 6, recoveries from a crash 5, last start-up recovery 76 ms
+in-flight reservations resolved: 11 committed, 14 released; reconciliation drift 3 products / 5 units; torn log bytes 0
+
+== invariants
+all 24 products balance: stock_on_hand == SUM(stock_movements), none negative, shared memory matches MySQL
+orders
+ok    no unpaid orders past their reservation deadline
+ok    no unpaid orders with no active reservation (could never expire)
+ok    no paid-or-later orders without exactly one successful payment
+ok    no orders whose timeline is incomplete
+ok    no reservations that disagree with their order's state
+ok    no refunded orders still holding a successful payment
+
+recovery times (ms): 982 904 939 917 911  (target <= 5000)
+load run: PASS, invariants: PASS
+CHAOS PASS
+-- run 2: recovery ms: 982 904 939 917 911    load 1 invariants 1
+
+================ 5. backpressure: 2 core workers, 16-slot queue, 64 API workers
+of-bench seed: 1000 benchmark SKUs (1000 created, 0 topped up to 1000000 units)
+-- 25 clients
+of-bench mix: mode lockfree-shm, 25 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   515.0 requests/s ok, 28.7 orders/s  (7725 ok, 46777 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        5898     31.5     54.0     63.1     82.2
+               add           1475     36.0     59.3     72.6     83.3
+               checkout       352     52.8     79.2     96.5    113.3
+               all           7725     33.0     57.2     70.5    113.3
+  not ok       busy 503: 46777, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- 100 clients
+of-bench mix: mode lockfree-shm, 100 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   514.9 requests/s ok, 6.9 orders/s  (7723 ok, 220609 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        6116     34.5     66.9     87.7    143.5
+               add           1539     40.6     74.5     96.1    160.8
+               checkout        68     66.1    143.9    163.4    163.4
+               all           7723     35.9     69.6     95.2    163.4
+  not ok       busy 503: 220609, rate-limited 429: 0, other 5xx: 0, other 4xx: 0, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- 250 clients
+of-bench mix: mode lockfree-shm, 250 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   517.4 requests/s ok, 6.5 orders/s  (7761 ok, 231812 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        6099     43.4     75.0     93.3    145.7
+               add           1597     50.2     85.2    104.3    128.5
+               checkout        65     74.5    108.1    176.1    176.1
+               all           7761     45.1     78.2     97.1    176.1
+  not ok       busy 503: 231811, rate-limited 429: 0, other 5xx: 0, other 4xx: 1, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- 500 clients
+of-bench mix: mode lockfree-shm, 500 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   564.2 requests/s ok, 7.7 orders/s  (8463 ok, 212568 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        6695     59.3     90.6    116.4    148.7
+               add           1690     64.3     98.4    125.2    143.2
+               checkout        78     77.9    146.8    175.6    175.6
+               all           8463     60.6     93.2    119.4    175.6
+  not ok       busy 503: 212567, rate-limited 429: 0, other 5xx: 0, other 4xx: 1, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- 1000 clients
+of-bench mix: mode lockfree-shm, 1000 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   583.7 requests/s ok, 10.5 orders/s  (8756 ok, 221900 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        6959     63.3    102.2   1097.9   4389.1
+               add           1736     69.5    118.6   1118.1   2145.5
+               checkout        61     84.7   1100.8   1112.1   1112.1
+               all           8756     64.6    107.3   1103.8   4389.1
+  not ok       busy 503: 221899, rate-limited 429: 0, other 5xx: 0, other 4xx: 1, network: 0, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- 2000 clients
+of-bench mix: mode lockfree-shm, 2000 clients, 15 s (+3 s warm-up), spread over 1000 SKUs, 4 browse + add + checkout per cycle
+
+  throughput   560.8 requests/s ok, 9.9 orders/s  (8412 ok, 219199 not ok)
+  latency ms                count      p50      p95      p99      max
+               browse        6669     66.2   1084.3   1332.7  14416.2
+               add           1681     72.2   1084.2   1323.1   2923.6
+               checkout        62     87.0    157.5   1307.8   1307.8
+               all           8412     67.6   1084.3   1325.3  14416.2
+  not ok       busy 503: 218981, rate-limited 429: 0, other 5xx: 0, other 4xx: 1, network: 217, sold out: 0
+  waiting for payments to settle... done
+  invariants   PASS
+-- of-core pid before 251321, after 251321, supervisor restarts: 0
+
+chart: bench-results/run-20261124-232509/charts/oversell.svg
+chart: bench-results/run-20261124-232509/charts/throughput-orders.svg
+chart: bench-results/run-20261124-232509/charts/throughput-requests.svg
+chart: bench-results/run-20261124-232509/charts/latency-checkout.svg
+chart: bench-results/run-20261124-232509/charts/contention-orders.svg
+chart: bench-results/run-20261124-232509/charts/contention-p99.svg
+chart: bench-results/run-20261124-232509/charts/recovery.svg
+chart: bench-results/run-20261124-232509/charts/backpressure.svg
+chart: bench-results/run-20261124-232509/charts/backpressure-memory.svg
+charts: bench-results/run-20261124-232509/charts/
+database reset to the seed data
+done: bench-results/run-20261124-232509

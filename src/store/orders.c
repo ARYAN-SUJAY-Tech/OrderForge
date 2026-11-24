@@ -330,21 +330,6 @@ void h_checkout(ctx_t *c)
 
     for (size_t i = 0; i < n; i++) {
         const line_t *l = &lines[i];
-        int64_t have = 0;
-        int rc = take_stock(c, l, &have);
-        if (rc < 0)
-            goto db_failed;
-        if (rc == 0) {
-            (void)db_rollback(c->db);
-            release_held(c, held, nheld, txid);
-            STORE_METRIC_ADD(c->s, orders_failed, 1);
-            if (have >= 0)
-                resp_error(c, 409, "out_of_stock", "only %lld left of %s", (long long)have,
-                           l->name);
-            else
-                resp_error(c, 409, "out_of_stock", "%s is out of stock", l->name);
-            return;
-        }
         if (db_exec(c->db,
                     "INSERT INTO order_items (order_id, product_id, qty, unit_price_paise) "
                     "VALUES (?, ?, ?, ?)",
@@ -368,8 +353,36 @@ void h_checkout(ctx_t *c)
         order_event(c->db, order_id, NULL, "placed", actor, "order placed") != 0 ||
         order_move(c->s, c->db, order_id, ORDER_PLACED, ORDER_PAYMENT_PENDING, "of-core",
                    "sent to the payment gateway", NULL) != 1 ||
-        db_exec(c->db, "DELETE FROM cart_items WHERE cart_id = ?", "i", cid) < 0 ||
-        db_commit(c->db) != 0)
+        db_exec(c->db, "DELETE FROM cart_items WHERE cart_id = ?", "i", cid) < 0)
+        goto db_failed;
+
+    /*
+     * Lock late: the inventory rows are written LAST, just before COMMIT. InnoDB holds a
+     * row lock from the UPDATE until the commit, so every statement placed after it
+     * would extend the time other buyers of the same product wait. With one hot product
+     * this hold time is what limits orders per second, in every stock mode (measured in
+     * the contention benchmark). Rows are still taken in ascending product id, and this
+     * keeps the documented lock order: orders -> payments -> reservations -> inventory.
+     */
+    for (size_t i = 0; i < n; i++) {
+        const line_t *l = &lines[i];
+        int64_t have = 0;
+        int rc = take_stock(c, l, &have);
+        if (rc < 0)
+            goto db_failed;
+        if (rc == 0) {
+            (void)db_rollback(c->db);
+            release_held(c, held, nheld, txid);
+            STORE_METRIC_ADD(c->s, orders_failed, 1);
+            if (have >= 0)
+                resp_error(c, 409, "out_of_stock", "only %lld left of %s", (long long)have,
+                           l->name);
+            else
+                resp_error(c, 409, "out_of_stock", "%s is out of stock", l->name);
+            return;
+        }
+    }
+    if (db_commit(c->db) != 0)
         goto db_failed;
 
     /* Durable in MySQL: the shared-memory reservation is now held by the order itself. */

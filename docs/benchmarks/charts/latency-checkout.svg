@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" role="img" aria-label="Checkout latency by percentile">
+
+<style>
+  .bg { fill: none; }
+  .t1 { fill: #0b0b0b; font: 600 15px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t2 { fill: #52514e; font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .t3 { fill: #52514e; font: 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .lab { fill: #0b0b0b; font: 600 11px system-ui, -apple-system, 'Segoe UI', sans-serif; }
+  .grid { stroke: #e4e3de; stroke-width: 1; }
+  .axis { stroke: #8a8984; stroke-width: 1; }
+  .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .gap { stroke: #ffffff; }
+  .s1 { fill: #2a78d6; stroke: #2a78d6; }
+  .s2 { fill: #eb6834; stroke: #eb6834; }
+  .s3 { fill: #1baf7a; stroke: #1baf7a; }
+  .s4 { fill: #eda100; stroke: #eda100; }
+  .s8 { fill: #e34948; stroke: #e34948; }
+  @media (prefers-color-scheme: dark) {
+    .t1, .lab { fill: #f0efec; }
+    .t2, .t3 { fill: #c3c2b7; }
+    .grid { stroke: #3a3935; }
+    .axis { stroke: #77766f; }
+    .ref { stroke: #c3c2b7; }
+    .gap { stroke: #1a1a19; }
+    .s1 { fill: #3987e5; stroke: #3987e5; }
+    .s2 { fill: #d95926; stroke: #d95926; }
+    .s3 { fill: #199e70; stroke: #199e70; }
+    .s4 { fill: #c98500; stroke: #c98500; }
+    .s8 { fill: #e66767; stroke: #e66767; }
+  }
+</style>
+
+<title>Checkout latency by percentile</title>
+<text x="16.0" y="24.0" class="t1" text-anchor="start">Checkout latency by percentile</text>
+<text x="16.0" y="42.0" class="t2" text-anchor="start">Mixed workload (4 browse + add + checkout per cycle), 1,000 SKUs; same y scale in every panel</text>
+<line x1="70.0" y1="320.0" x2="310.0" y2="320.0" class="axis"/>
+<text x="64.0" y="324.0" class="t3" text-anchor="end">0</text>
+<line x1="70.0" y1="265.0" x2="310.0" y2="265.0" class="grid"/>
+<text x="64.0" y="269.0" class="t3" text-anchor="end">500</text>
+<line x1="70.0" y1="210.0" x2="310.0" y2="210.0" class="grid"/>
+<text x="64.0" y="214.0" class="t3" text-anchor="end">1k</text>
+<line x1="70.0" y1="155.0" x2="310.0" y2="155.0" class="grid"/>
+<text x="64.0" y="159.0" class="t3" text-anchor="end">1500</text>
+<line x1="70.0" y1="100.0" x2="310.0" y2="100.0" class="grid"/>
+<text x="64.0" y="104.0" class="t3" text-anchor="end">2k</text>
+<text x="70.0" y="92.0" class="t2" text-anchor="start">p50 (ms)</text>
+<text x="94.0" y="336.0" class="t3" text-anchor="middle">50</text>
+<text x="142.0" y="336.0" class="t3" text-anchor="middle">100</text>
+<text x="190.0" y="336.0" class="t3" text-anchor="middle">250</text>
+<text x="238.0" y="336.0" class="t3" text-anchor="middle">500</text>
+<text x="286.0" y="336.0" class="t3" text-anchor="middle">1000</text>
+<text x="190.0" y="354.0" class="t2" text-anchor="middle">concurrent clients</text>
+<path d="M94.0,316.8 L142.0,314.3 L190.0,302.3 L238.0,271.3 L286.0,284.6" class="s1" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="94.0" cy="316.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p50, 50 clients: 28.9 ms</title></circle>
+<circle cx="142.0" cy="314.3" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p50, 100 clients: 51.5 ms</title></circle>
+<circle cx="190.0" cy="302.3" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p50, 250 clients: 160.7 ms</title></circle>
+<circle cx="238.0" cy="271.3" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p50, 500 clients: 442.4 ms</title></circle>
+<circle cx="286.0" cy="284.6" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p50, 1000 clients: 322.2 ms</title></circle>
+<path d="M94.0,316.6 L142.0,314.1 L190.0,299.1 L238.0,274.8 L286.0,286.9" class="s2" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="94.0" cy="316.6" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p50, 50 clients: 30.6 ms</title></circle>
+<circle cx="142.0" cy="314.1" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p50, 100 clients: 53.4 ms</title></circle>
+<circle cx="190.0" cy="299.1" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p50, 250 clients: 189.6 ms</title></circle>
+<circle cx="238.0" cy="274.8" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p50, 500 clients: 411.2 ms</title></circle>
+<circle cx="286.0" cy="286.9" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p50, 1000 clients: 301.3 ms</title></circle>
+<path d="M94.0,315.6 L142.0,312.0 L190.0,295.8 L238.0,253.1 L286.0,278.2" class="s3" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="94.0" cy="315.6" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p50, 50 clients: 40.4 ms</title></circle>
+<circle cx="142.0" cy="312.0" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p50, 100 clients: 72.7 ms</title></circle>
+<circle cx="190.0" cy="295.8" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p50, 250 clients: 220.3 ms</title></circle>
+<circle cx="238.0" cy="253.1" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p50, 500 clients: 608.1 ms</title></circle>
+<circle cx="286.0" cy="278.2" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p50, 1000 clients: 379.7 ms</title></circle>
+<line x1="370.0" y1="320.0" x2="610.0" y2="320.0" class="axis"/>
+<text x="364.0" y="324.0" class="t3" text-anchor="end">0</text>
+<line x1="370.0" y1="265.0" x2="610.0" y2="265.0" class="grid"/>
+<text x="364.0" y="269.0" class="t3" text-anchor="end">500</text>
+<line x1="370.0" y1="210.0" x2="610.0" y2="210.0" class="grid"/>
+<text x="364.0" y="214.0" class="t3" text-anchor="end">1k</text>
+<line x1="370.0" y1="155.0" x2="610.0" y2="155.0" class="grid"/>
+<text x="364.0" y="159.0" class="t3" text-anchor="end">1500</text>
+<line x1="370.0" y1="100.0" x2="610.0" y2="100.0" class="grid"/>
+<text x="364.0" y="104.0" class="t3" text-anchor="end">2k</text>
+<text x="370.0" y="92.0" class="t2" text-anchor="start">p95</text>
+<text x="394.0" y="336.0" class="t3" text-anchor="middle">50</text>
+<text x="442.0" y="336.0" class="t3" text-anchor="middle">100</text>
+<text x="490.0" y="336.0" class="t3" text-anchor="middle">250</text>
+<text x="538.0" y="336.0" class="t3" text-anchor="middle">500</text>
+<text x="586.0" y="336.0" class="t3" text-anchor="middle">1000</text>
+<text x="490.0" y="354.0" class="t2" text-anchor="middle">concurrent clients</text>
+<path d="M394.0,314.8 L442.0,309.8 L490.0,297.8 L538.0,253.9 L586.0,261.7" class="s1" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="394.0" cy="314.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p95, 50 clients: 47.4 ms</title></circle>
+<circle cx="442.0" cy="309.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p95, 100 clients: 93.1 ms</title></circle>
+<circle cx="490.0" cy="297.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p95, 250 clients: 201.6 ms</title></circle>
+<circle cx="538.0" cy="253.9" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p95, 500 clients: 600.9 ms</title></circle>
+<circle cx="586.0" cy="261.7" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p95, 1000 clients: 530.0 ms</title></circle>
+<path d="M394.0,313.3 L442.0,308.0 L490.0,285.6 L538.0,265.2 L586.0,259.8" class="s2" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="394.0" cy="313.3" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p95, 50 clients: 60.5 ms</title></circle>
+<circle cx="442.0" cy="308.0" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p95, 100 clients: 108.9 ms</title></circle>
+<circle cx="490.0" cy="285.6" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p95, 250 clients: 312.7 ms</title></circle>
+<circle cx="538.0" cy="265.2" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p95, 500 clients: 498.6 ms</title></circle>
+<circle cx="586.0" cy="259.8" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p95, 1000 clients: 547.7 ms</title></circle>
+<path d="M394.0,312.4 L442.0,305.8 L490.0,284.1 L538.0,236.4 L586.0,244.5" class="s3" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="394.0" cy="312.4" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p95, 50 clients: 69.5 ms</title></circle>
+<circle cx="442.0" cy="305.8" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p95, 100 clients: 129.4 ms</title></circle>
+<circle cx="490.0" cy="284.1" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p95, 250 clients: 326.0 ms</title></circle>
+<circle cx="538.0" cy="236.4" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p95, 500 clients: 760.4 ms</title></circle>
+<circle cx="586.0" cy="244.5" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p95, 1000 clients: 686.4 ms</title></circle>
+<line x1="670.0" y1="320.0" x2="910.0" y2="320.0" class="axis"/>
+<text x="664.0" y="324.0" class="t3" text-anchor="end">0</text>
+<line x1="670.0" y1="265.0" x2="910.0" y2="265.0" class="grid"/>
+<text x="664.0" y="269.0" class="t3" text-anchor="end">500</text>
+<line x1="670.0" y1="210.0" x2="910.0" y2="210.0" class="grid"/>
+<text x="664.0" y="214.0" class="t3" text-anchor="end">1k</text>
+<line x1="670.0" y1="155.0" x2="910.0" y2="155.0" class="grid"/>
+<text x="664.0" y="159.0" class="t3" text-anchor="end">1500</text>
+<line x1="670.0" y1="100.0" x2="910.0" y2="100.0" class="grid"/>
+<text x="664.0" y="104.0" class="t3" text-anchor="end">2k</text>
+<text x="670.0" y="92.0" class="t2" text-anchor="start">p99</text>
+<text x="694.0" y="336.0" class="t3" text-anchor="middle">50</text>
+<text x="742.0" y="336.0" class="t3" text-anchor="middle">100</text>
+<text x="790.0" y="336.0" class="t3" text-anchor="middle">250</text>
+<text x="838.0" y="336.0" class="t3" text-anchor="middle">500</text>
+<text x="886.0" y="336.0" class="t3" text-anchor="middle">1000</text>
+<text x="790.0" y="354.0" class="t2" text-anchor="middle">concurrent clients</text>
+<path d="M694.0,311.9 L742.0,305.5 L790.0,294.8 L838.0,249.7 L886.0,148.1" class="s1" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="694.0" cy="311.9" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p99, 50 clients: 73.3 ms</title></circle>
+<circle cx="742.0" cy="305.5" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p99, 100 clients: 132.0 ms</title></circle>
+<circle cx="790.0" cy="294.8" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p99, 250 clients: 229.2 ms</title></circle>
+<circle cx="838.0" cy="249.7" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p99, 500 clients: 639.5 ms</title></circle>
+<circle cx="886.0" cy="148.1" r="4" class="s1 gap" stroke-width="2" style="stroke-width:2"><title>naive p99, 1000 clients: 1562.4 ms</title></circle>
+<path d="M694.0,310.4 L742.0,302.3 L790.0,277.0 L838.0,258.6 L886.0,139.1" class="s2" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="694.0" cy="310.4" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p99, 50 clients: 87.1 ms</title></circle>
+<circle cx="742.0" cy="302.3" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p99, 100 clients: 160.7 ms</title></circle>
+<circle cx="790.0" cy="277.0" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p99, 250 clients: 390.6 ms</title></circle>
+<circle cx="838.0" cy="258.6" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p99, 500 clients: 558.4 ms</title></circle>
+<circle cx="886.0" cy="139.1" r="4" class="s2 gap" stroke-width="2" style="stroke-width:2"><title>db-lock p99, 1000 clients: 1644.3 ms</title></circle>
+<path d="M694.0,309.5 L742.0,302.3 L790.0,276.4 L838.0,227.2 L886.0,143.4" class="s3" fill="none" style="fill:none" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="694.0" cy="309.5" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p99, 50 clients: 95.1 ms</title></circle>
+<circle cx="742.0" cy="302.3" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p99, 100 clients: 161.1 ms</title></circle>
+<circle cx="790.0" cy="276.4" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p99, 250 clients: 396.6 ms</title></circle>
+<circle cx="838.0" cy="227.2" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p99, 500 clients: 843.2 ms</title></circle>
+<circle cx="886.0" cy="143.4" r="4" class="s3 gap" stroke-width="2" style="stroke-width:2"><title>lockfree-shm p99, 1000 clients: 1605.0 ms</title></circle>
+<rect x="70.0" y="54.0" width="12" height="12" rx="3" class="s1"/>
+<text x="87.0" y="64.0" class="t2" text-anchor="start">naive</text>
+<rect x="135.0" y="54.0" width="12" height="12" rx="3" class="s2"/>
+<text x="152.0" y="64.0" class="t2" text-anchor="start">db-lock</text>
+<rect x="214.0" y="54.0" width="12" height="12" rx="3" class="s3"/>
+<text x="231.0" y="64.0" class="t2" text-anchor="start">lockfree-shm</text>
+</svg>

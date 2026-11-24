@@ -10,9 +10,12 @@ stock is never oversold under concurrent checkout. The project is built around
 operating-system concepts: processes, threads, IPC, shared memory, synchronisation,
 signals and crash recovery.
 
-## 2. Architecture (as built, phase 3)
+## 2. Architecture (as built, phase 4)
 
 ```
+                 of-supervisor ── fork/exec, own process group each, restart with backoff,
+                       │          SIGHUP reload, ordered SIGTERM drain, flock pid file
+                       ▼ (parent of every daemon below)
 Browser ─HTTP─▶ Apache httpd ─FastCGI (TCP 127.0.0.1:9000)─▶ of-api   (parent + N pre-forked workers)
                 static web/, CSP                                │ one persistent connection per worker
                                                                 ▼ Unix socket, binary frames, SO_PEERCRED
@@ -25,14 +28,16 @@ Browser ─HTTP─▶ Apache httpd ─FastCGI (TCP 127.0.0.1:9000)─▶ of-api 
                     │   admin, reports      │ payment outbox (bounded)             │   /orderforge-pay-req
                     │                       ▼                                      │ ───────────────▶ of-pay
                     │ pay-sender thread: HMAC-sign, mq_timedsend                   │   (mock gateway:
-                    │ background thread: epoll over reply queue + timerfd reaper ◀─┼── epoll + timerfd
-                    │                    (own MySQL connection)                    │   + reply heap)
-                    └──────┬──────────────────────────────────┬────────────────────┘ ◀───────────────
-                           ▼                                  ▼                        /orderforge-pay-rep
-             POSIX shm "/orderforge"                    MySQL (InnoDB) ◀──── of-report (timerfd:
-             stock table + metrics                      durable truth        aggregates + CSV via rename)
+                    │ payment-reply workers × 4: mq_timedreceive, verify, apply ◀──┼── epoll + timerfd
+                    │ reaper thread: timerfd, expires unpaid reservations          │   + reply heap)
+                    │ WAL flusher thread: group commit (write + fdatasync)         │ ◀───────────────
+                    └──────┬───────────────────┬──────────────────┬────────────────┘  /orderforge-pay-rep
+                           ▼                   ▼                  ▼
+             POSIX shm "/orderforge"     run/of-core.wal     MySQL (InnoDB) ◀──── of-report (timerfd:
+             stock table + metrics       (CRC records)       durable truth        aggregates + CSV via rename)
+             survives a crash
                    ▲ read-only
-             of-ctl, of-bench, of-report
+             of-ctl, of-bench, of-report, of-api (/api/metrics)
 ```
 
 | Process | Role | Talks to |
@@ -41,10 +46,9 @@ Browser ─HTTP─▶ Apache httpd ─FastCGI (TCP 127.0.0.1:9000)─▶ of-api 
 | of-core | The engine: every request is authenticated, authorised and executed here. It also sends payments, applies gateway replies and expires unpaid reservations | of-api, MySQL, shared memory, both payment queues |
 | of-pay | Mock payment gateway. Has no database; links only libsodium for the HMAC | Payment queues |
 | of-report | Periodic sales aggregation and atomic CSV reports | MySQL; shared memory (read-only, for live low-stock figures) |
-| of-ctl | Operator tool: `useradd`, `invariants` | MySQL; shared memory (read-only) |
+| of-supervisor | Parent of the four daemons: starts them in order, restarts crashes, forwards reloads, drains on shutdown | its children (signals, waitpid), the status file |
+| of-ctl | Operator tool: `useradd`, `invariants`, `status`, `metrics`, `stuck`, `reload`, `stop` | MySQL; shared memory (read-only); supervisor pid and status files |
 | of-bench | Load generator and invariant checker | Apache (HTTP), MySQL; shared memory (read-only) |
-
-*Planned:* the WAL and of-supervisor arrive in phase 4.
 
 ### Why these IPC mechanisms
 
@@ -355,7 +359,145 @@ of-pay: verify MAC + nonce, decide by token, schedule reply on a min-heap, timer
 | of-pay down | Requests wait in the kernel queue (or the outbox); unpaid orders expire; core shutdown stays fast | manual |
 | Illegal transition | 409 `invalid_transition`; nothing changes | payment_test, unit |
 
-## 8. Data model
+## 8. Durability and supervision (phase 4)
+
+### Why a write-ahead log, when MySQL is the source of truth
+
+The shared-memory stock table is a cache of MySQL. It lives in `/dev/shm`, so it
+**survives** a `kill -9` of of-core, together with every metric in it. A lockfree-shm
+checkout changes it before MySQL commits:
+
+```
+CAS-reserve in shared memory ─▶ RESERVE(txid, lines) durable in the WAL ─▶ MySQL transaction
+                                                                          (orders.wal_txid = txid)
+                                                                      ─▶ COMMIT(txid, order) | RELEASE(txid)
+```
+
+If of-core dies anywhere in that sequence, the surviving table holds units in
+`reserved` that may or may not have been sold. The WAL tells recovery exactly which
+reservations were in flight, and `orders.wal_txid` tells it what MySQL decided for
+each one:
+
+- **txid found in MySQL:** the order committed. Recovery commits the reservation, so
+  the units stay sold.
+- **Not found:** MySQL rolled the transaction back when the connection died. Recovery
+  releases the reservation, so the units go back on sale.
+
+A lost COMMIT or RELEASE record is therefore harmless, which is why only the RESERVE
+record is waited on. MySQL is asked, not guessed. This is the participant-lookup step
+of a two-phase commit, done at recovery time.
+
+### The log (`src/common/wal.c`)
+
+- **Record:**
+  `magic "OFWL" | length | type | seq | payload | CRC32 over type, seq and payload`.
+  - Types: RESERVE (txid and the cart lines), COMMIT (txid and order id), RELEASE
+    (txid) and CHECKPOINT.
+- **Group commit:**
+  - Appenders encode into a shared buffer under a mutex and wait on a condition
+    variable.
+  - One flusher thread swaps the buffer out, then does one `write()` and one
+    `fdatasync()` for the whole batch.
+  - It lingers `core.wal_group_us` (2 ms) to gather more records, then wakes every
+    waiter whose record is now on disk.
+  - In the unit test, 8 threads made 8,000 records durable with 503 fsyncs.
+- **Torn tail:** replay stops at the first bad magic, impossible length or CRC
+  mismatch, then truncates the file there. The unit test cuts a record in half and
+  corrupts every single byte of a record; each is rejected.
+- **Compaction:** past `core.wal_max_bytes`, the log is rewritten as a CHECKPOINT plus
+  a RESERVE for every reservation still in flight. The new file is written, fsynced,
+  `rename()`d over the old one, and then the directory is fsynced, so a crash leaves
+  either the old log or the new one.
+- **Where it applies:** only lockfree-shm checkouts are logged. The sold-out fast path
+  never waits on an fsync, because a CAS that fails writes nothing. Only the winners
+  pay for durability.
+
+### Start-up and recovery (`setup_stock_and_recover` in of-core)
+
+1. **Single instance:** a pid file locked with `flock()` (the kernel drops the lock
+   even on `kill -9`) and the socket probe guarantee one core.
+2. **The table:** reopen a surviving table (`stock_reopen`), meaning the previous core
+   crashed, or create a fresh one. A clean stop removes the table.
+3. **Replay** the WAL, collecting the RESERVE records that have no outcome.
+4. **Resolve** each one against MySQL, as described above.
+5. **Reconcile** every product: shared memory must show `available == stock_on_hand`
+   and `reserved == 0`. Any difference is corrected and counted.
+   - Drift is legitimately possible only in tiny windows: between a CAS and its RESERVE
+     record, or inside an admin change or a cancellation.
+   - Every one of these windows can only make shared memory show **less** stock than
+     MySQL, never more. A crash can make OrderForge briefly undersell, never oversell.
+6. **New transaction ids** start above anything seen in the log or in
+   `orders.wal_txid`.
+7. **A fresh log** is started (the compaction path). The core then accepts traffic.
+
+Every step is counted in shared memory: starts, recoveries, recovery time, resolved
+committed and released, drift products and units, torn bytes. `of-ctl status` and
+`/api/metrics` show them.
+
+### of-supervisor (`src/supervisor/main.c`)
+
+- **Start order:** of-core first, polling until its socket accepts connections.
+  Recovery happens before that. Then of-pay, of-report and of-api.
+- **Process groups:** each child runs `setpgid(0,0)` before `execv()`. A terminal
+  Ctrl-C then reaches only the supervisor, and a stuck child can be killed together
+  with its own children (`kill(-pgid)`; of-api has 16).
+- **Events:** one epoll loop over a signalfd (SIGCHLD, SIGTERM, SIGINT, SIGHUP) and a
+  timerfd armed for the next scheduled restart.
+- **Crashes:** `waitpid(WNOHANG)` records the exit status or signal.
+  - The child is restarted after a backoff of 100 ms, doubling to 5 s, which resets
+    after 10 s of uptime.
+  - More than `supervisor.max_restarts` crashes within `supervisor.window_s` marks it
+    failed and the system **degraded**. Restarting stops, which prevents fork storms.
+  - Tested: six quick `kill -9`s of of-pay tripped it, and `of-ctl reload` revived it.
+- **SIGHUP:** forwarded to every child, and failed children get a fresh chance. What
+  each daemon reloads:
+
+| Daemon | Reloads on SIGHUP |
+|---|---|
+| of-core | log file, `log.level`, `core.slow_ms`, `core.job_timeout_ms` |
+| of-pay | log file, latency and outcome rates |
+| of-report | log file, interval and window (timer re-armed), then reports immediately |
+| of-api | log files |
+
+- **SIGTERM / SIGINT:** stops the daemons front to back (of-api, of-report, of-pay,
+  then of-core, which drains in-flight requests). Any daemon still running after
+  `supervisor.stop_timeout_s` is SIGKILLed with its whole group.
+- **Status file:** state goes to `<run.dir>/supervisor.status`, written to a temporary
+  file and renamed. `of-ctl status` reads it.
+
+**Lessons learned building it:**
+
+- **A thread that doesn't block SIGTERM kills the process.** of-core blocked
+  SIGTERM/SIGINT/SIGHUP only after recovery, but recovery now started the WAL flusher
+  thread with those signals unblocked. The kernel may deliver a process-directed signal
+  to any thread that doesn't block it, and the default action of SIGTERM killed the
+  whole core instead of letting the reactor drain it. The signals are now blocked as
+  the first statement of `main`, before any thread exists.
+- **One thread for two jobs starved the reaper.** The first chaos run left 344 orders
+  unpaid past their deadline: one background thread applied every payment reply *and*
+  ran the reaper. At ~230 checkouts/s the reply loop never emptied the queue, so the
+  reaper's timer was never serviced. Replies now go to `core.payment_workers` threads,
+  each blocking on its own descriptor for the reply queue (the kernel gives each message
+  to exactly one of them), and the reaper has its own thread.
+- **Per-thread setup slowed recovery.** Each of of-core's 17 store instances computed
+  its own Argon2id dummy hash (64 MiB, about 0.1 s each), which slowed every restart.
+  It is now computed once per process (`pthread_once`). Recovery to serving dropped
+  from about 2.0 s to about 1.4 s.
+
+### Observability
+
+- **`/api/metrics`** (Prometheus text format, localhost only) and **`of-ctl metrics`**
+  render the shared-memory metrics. They map the table read-only per scrape, so they
+  work while of-core is busy, and they show `core_up 0` while it is down.
+- **Contents:** counters for requests, orders, CAS retries, payments, busy rejections,
+  expired reservations, the WAL and recovery; a request-latency histogram (time from
+  queueing to response); per-product live stock (available and reserved).
+- **`of-ctl status`:** daemons (pid, state, restarts, uptime, last exit), the engine,
+  approximate latency percentiles, payments, WAL (average batch and fsync time) and
+  recovery.
+- **`of-ctl stuck` / `of-ctl invariants`:** the order-level invariant checks (section 9).
+
+## 9. Data model
 
 The schema is `sql/schema.sql`:
 
@@ -367,12 +509,24 @@ The schema is `sql/schema.sql`:
 - *phase 3:* reservations (`(state, expires_at)` index for the reaper); payments
   (unique idempotency key; pending, succeeded, declined, timed_out, cancelled or
   refunded); daily_sales, product_sales_daily, report_meta (written by of-report)
+- *phase 4:* `orders.wal_txid` (unique). The WAL transaction whose reservation the
+  order committed is what recovery looks up.
 
-**Invariant:** for every product, `SUM(stock_movements.delta) = stock_on_hand >= 0`.
-In lockfree-shm mode, while no checkout is in flight, it must also hold that
-shared-memory `available = stock_on_hand` and `reserved = 0`.
+**Invariants, checked by `of-ctl invariants`, `of-bench` and the chaos test:**
 
-## 9. Security
+- **Stock:** for every product, `SUM(stock_movements.delta) = stock_on_hand >= 0`.
+- **Shared memory (lockfree-shm):** while no checkout is in flight,
+  `available = stock_on_hand` and `reserved = 0`.
+- **Orders:**
+  - Every paid, packed, shipped or delivered order has exactly one successful payment.
+  - Every order has a `placed` event, and its last event matches its status.
+  - Reservation states agree with order states: active means unpaid; committed means
+    paid or later; released means cancelled or refunded.
+  - No refunded order still holds a successful payment.
+  - No unpaid order is more than 30 s past its reservation deadline, and none has no
+    active reservation at all.
+
+## 10. Security
 
 Security is enforced in of-core, so of-api cannot bypass it.
 
@@ -411,7 +565,15 @@ Phase 3 adds:
 - **Audit:** every cancellation, refund, status change and automatic refund is written
   to `audit_log`.
 
-## 10. Results so far
+Phase 4 adds:
+
+- **Single instance:** every daemon holds a flock pid file, so a second copy refuses to
+  start.
+- **Metrics:** `/api/metrics` is served only to 127.0.0.1 or ::1.
+- **Read-only tools:** `of-ctl` reads metrics and status through a read-only mapping
+  and the status file, and changes nothing except by sending signals.
+
+## 11. Results so far
 
 ### Gate 1 (phase 1)
 
@@ -470,12 +632,44 @@ Both runs used the 1,000-buyer rush plus the 56-check API suite:
   ran the payment suite, the API suite and the 1,000-buyer rush. They reported no data
   race, memory error or leak, including at SIGTERM shutdown.
 
-## 11. Testing
+### Gate 4 (phase 4): kill -9 under load
+
+Run with `scripts/chaos.sh`. `of-bench load` keeps 50 customers shopping continuously
+(add to cart, check out, repeat) through Apache. Partway through, `kill -9` hits of-core
+with no warning. The supervisor restarts it, and the new core replays the WAL and
+reconciles before serving. Clients whose checkout failed mid-crash retry with the same
+Idempotency-Key.
+
+| Run | Load | Kills | Serving again after | In-flight resolved (committed / released) | Drift fixed | Retries answered "already placed" | Invariants |
+|---|---|---|---|---|---|---|---|
+| 1 | 205 checkouts/s, 30 s | 2 | 2487, 1893 ms | 6 / 5 | 0 | 10 | all pass |
+| 2 (one Argon2 hash per process) | 230 checkouts/s, 40 s | 3 | 1368, 1438, 1399 ms | 6 / 8 | 3 products, 5 units | 7 | all pass |
+
+- **Target met:** serving again in under 5 s, with every invariant intact. These are
+  the stock ledger, shared memory equals MySQL, and all six order checks.
+- **No lost checkouts:** no client gave up, and no checkout was placed twice. The
+  "already placed" retries are checkouts that committed in MySQL just before the crash;
+  the client retried with the same key and was handed the existing order.
+- **Where the outage shows:** in the per-second timeline it is one second with about
+  50 failed attempts and one with no traffic, while clients back off.
+- **Under ThreadSanitizer**, with every daemon under TSan via `setarch -R` on the
+  supervisor, which children inherit:
+  - Two kills during load produced no data-race reports, including at shutdown, and
+    every invariant passed.
+  - Recovery took about 7 s there, because TSan slows everything.
+  - Reconciliation corrected 7 units: the CAS-to-WAL window, which is wider when
+    everything runs slowly.
+- **Under AddressSanitizer:** both 56-check suites passed, chaos passed, and there
+  were no memory errors and no leaks at shutdown.
+
+## 12. Testing
 
 | Layer | What runs | Result |
 |---|---|---|
-| Unit | `make test`: 10 programs covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm), **order state machine** (all 64 edges, actors, final states), and **payment messages** (every-byte tampering, forgery, wrong key, replay window and nonce ring) | Passes in debug, asan, ubsan, tsan and release |
+| Unit | `make test`: 11 programs covering config, logger, CRC32, JSON, buffer and parsing, **protocol** (round trip, caps, every truncation), **queue** (FIFO, backpressure, 4×4 threads), **stock** (layout, probing, reserve_all rollback, 16 threads on one hot SKU, 8 processes through named shm), **order state machine** (all 64 edges, actors, final states), **payment messages** (every-byte tampering, forgery, wrong key, replay window and nonce ring), and **WAL** (encoding, every-byte corruption, torn tail truncated, group commit with 8 threads, compaction keeping exactly the in-flight reservations) | Passes in debug, asan, ubsan, tsan and release |
 | Integration | `tests/integration/api_test.sh`: 56 checks through Apache → of-api → of-core | 56/56 |
 | Payments and orders | `tests/integration/payment_test.sh` with `conf/test.conf` (4 s TTL): 56 checks | 56/56 |
 | Concurrency | `of-bench oversell` / `scripts/oversell-experiment.sh` | Gate 2 table above |
 | Lifecycle | Restart of-core under a running of-api; SIGTERM drain; core down gives 503 | of-api reconnects by itself; clean drain; shared memory and socket removed |
+| Chaos | `scripts/chaos.sh`: `kill -9` of-core under `of-bench load`, then every invariant | Gate 4 table above |
+| Supervision | Crash-loop of-pay six times; `of-ctl reload`; `of-ctl stop` | Degraded after the sixth crash, revived by reload, ordered drain on stop |

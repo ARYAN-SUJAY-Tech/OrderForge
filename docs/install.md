@@ -67,18 +67,38 @@ from `conf/apache-orderforge.conf`. Re-run it after changing files under `web/`.
 ## 6. Start the daemons
 
 ```sh
-scripts/run.sh                    # all four daemons in the foreground; Ctrl-C stops them
+scripts/run.sh                    # of-supervisor and all daemons, in the foreground
 MODE=naive scripts/run.sh         # override the stock mode: naive | db-lock | lockfree-shm
 ```
 
-`run.sh` starts `of-core` first and waits for its socket. Then it starts `of-pay` (the
-mock payment gateway), `of-report` (sales aggregation) and `of-api`. If any daemon
-exits, it stops the others.
+`run.sh` starts `of-supervisor`, which then:
 
-Open <http://localhost:8080/>. Each daemon writes JSON-line logs to `run/log/<name>.log`.
-Reports are written to `run/reports/`.
+1. starts `of-core` and waits until it serves, including any crash recovery;
+2. starts `of-pay` (the mock payment gateway), `of-report` (sales aggregation) and
+   `of-api`;
+3. restarts any daemon that crashes.
 
-You can also start the daemons by hand, `of-core` first:
+Ctrl-C, or `of-ctl stop`, stops everything in order. Open <http://localhost:8080/>.
+
+| What | Where |
+|---|---|
+| Logs | JSON lines in `run/log/<name>.log` |
+| Reports | `run/reports/` |
+| Pid files and the supervisor status | `run/` |
+| Write-ahead log | `run/of-core.wal` |
+
+Operating it, from another terminal:
+
+```sh
+build/debug/of-ctl status         # daemons, requests, latency, payments, WAL, recovery
+build/debug/of-ctl metrics        # Prometheus text (also: curl localhost:8080/api/metrics)
+build/debug/of-ctl invariants     # stock ledger, shared memory vs MySQL, order checks
+build/debug/of-ctl stuck          # orders that should have moved on
+build/debug/of-ctl reload         # SIGHUP: reopen logs, reload settings, retry failed daemons
+build/debug/of-ctl stop           # ordered drain and shutdown
+```
+
+You can also start the daemons by hand, without the supervisor, `of-core` first:
 
 ```sh
 ./build/debug/of-core   -c conf/orderforge.conf [-m lockfree-shm]
@@ -92,6 +112,14 @@ You can also start the daemons by hand, `of-core` first:
 | Stop | Ctrl-C, or `kill -TERM <pid>`. of-core drains in-flight requests first |
 | Reopen the log files | `kill -HUP <pid>` |
 | Regenerate reports now | `pkill -HUP of-report` |
+
+**Upgrading from phase 3:**
+
+1. Stop the old stack: Ctrl-C in its terminal.
+2. Run `./scripts/load-db.sh`. Phase 4 adds `orders.wal_txid`, and this resets the
+   data.
+3. Run `make`.
+4. Start everything with `scripts/run.sh`.
 
 **Upgrading from phase 2:**
 
@@ -125,7 +153,21 @@ CONF=conf/test.conf scripts/run.sh       # in one terminal
 TTL=4 tests/integration/payment_test.sh  # in another: 56 checks, about a minute
 ```
 
-## 8. The oversell experiment (gate 2)
+## 8. The crash test (gate 4)
+
+With the stack running under the supervisor (`scripts/run.sh`), in another terminal:
+
+```sh
+scripts/chaos.sh                        # 50 clients for 30 s, one kill -9 of of-core
+KILLS=3 CLIENTS=80 DURATION=45 scripts/chaos.sh
+```
+
+It reports how long the API took to serve again after each kill (target under 5 s),
+the load run's results, the recovery counters and every invariant. A copy is saved
+under `bench-results/`. The test adds orders to the store; reset afterwards with
+`scripts/load-db.sh`.
+
+## 9. The oversell experiment (gate 2)
 
 Stop `run.sh`, then start `of-api` on its own. The experiment starts and stops `of-core`
 itself, once per mode.
@@ -151,7 +193,10 @@ To run one mode by hand while `run.sh` is running:
 | `make` says libraries are missing | Run `sudo ./scripts/install-deps.sh`, then `make deps` |
 | `/api/...` returns 503 from Apache (HTML page) | of-api is not running or is not listening on `api.listen` (default 127.0.0.1:9000) |
 | `/api/...` returns 503 `core_unavailable` | of-core is not running; start it (or use `scripts/run.sh`) |
-| of-core: "another of-core is already listening" | One is already running; stop it first (`pkill of-core`) |
+| of-core: "another of-core is already listening" or "already running (pid N holds run/of-core.pid)" | One is already running; stop it first (`of-ctl stop`) |
+| `of-ctl status` shows DEGRADED | A daemon crashed more than 5 times in 60 s; read its log, fix the cause, then `of-ctl reload` |
+| of-core logs `reconcile ... corrected` after a crash | Expected occasionally: a crash in the microseconds between a reservation and its log record; shared memory is corrected from MySQL |
+| A MySQL error "Unknown column 'wal_txid'" | The schema is from phase 3; run `scripts/load-db.sh` |
 | of-core: "cannot create shared memory" | A stale object owned by another user; check `ls -l /dev/shm/orderforge` |
 | of-bench FAIL mentioning "oversold units from an earlier run" | A naive run left the ledger unbalanced; reset with `scripts/load-db.sh` |
 | of-core: "pay.hmac_key missing or invalid" | Add a key: `echo "pay.hmac_key = $(openssl rand -hex 32)" >> conf/orderforge.conf` |

@@ -36,7 +36,7 @@
 #include <stdint.h>
 
 #define OF_STOCK_MAGIC 0x4F465354u /* "OFST" */
-#define OF_STOCK_ABI   2
+#define OF_STOCK_ABI   3
 
 typedef struct {
     _Atomic int32_t  available;   /* on hand minus reserved */
@@ -47,7 +47,22 @@ typedef struct {
     uint8_t          pad[36];
 } stock_slot_t;
 
-/* Process-wide counters, readable by of-ctl. */
+/* Write-ahead log counters (src/common/wal.c updates them in place). */
+typedef struct {
+    _Atomic uint64_t appends;
+    _Atomic uint64_t flushes;        /* write + fdatasync rounds */
+    _Atomic uint64_t bytes;
+    _Atomic uint64_t flush_us_total; /* time spent in write + fdatasync */
+    _Atomic uint64_t max_batch;      /* most records made durable by one fsync */
+    _Atomic uint64_t compactions;
+} wal_stats_t;
+
+/* Request latency histogram buckets (upper bounds, milliseconds; the last is +Inf). */
+#define OF_LAT_BUCKETS 11
+#define OF_LAT_BOUNDS_MS {1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, -1}
+
+/* Process-wide counters, readable by of-ctl. They live in shared memory, so they survive
+ * a crash of of-core and keep counting after the restart. */
 typedef struct {
     _Atomic uint64_t requests_total;
     _Atomic uint64_t busy_rejects;     /* queue full: answered "busy" */
@@ -63,6 +78,20 @@ typedef struct {
     _Atomic uint64_t payments_rejected;   /* bad MAC, stale or replayed nonce */
     _Atomic uint64_t late_refunds;        /* success arrived after the order expired */
     _Atomic uint64_t reservations_expired;
+    /* request latency, measured by of-core from queueing to response */
+    _Atomic uint64_t latency_bucket[OF_LAT_BUCKETS];
+    _Atomic uint64_t latency_sum_us;
+    _Atomic uint64_t latency_count;
+    wal_stats_t      wal;
+    /* crash recovery (see of-core) */
+    _Atomic uint64_t recoveries;          /* starts that found a crashed predecessor */
+    _Atomic uint64_t starts;
+    _Atomic uint64_t recovery_ms_last;
+    _Atomic uint64_t recovered_committed; /* in-flight RESERVEs that MySQL had committed */
+    _Atomic uint64_t recovered_released;  /* ... that MySQL had rolled back */
+    _Atomic uint64_t drift_products;      /* fixed by reconciliation (expected 0) */
+    _Atomic uint64_t drift_units;
+    _Atomic uint64_t wal_torn_bytes;      /* discarded torn tails, total */
 } stock_metrics_t;
 
 typedef struct {
@@ -99,6 +128,10 @@ typedef struct {
 /* of-core: create (or reset) the named object with room for capacity products
  * (rounded up to a power of two). 0 or -1 with errno. */
 int  stock_create(stock_table_t *t, const char *name, uint32_t capacity);
+
+/* of-core after a crash: map the surviving table read-write without resetting it.
+ * 0, or -1 (errno ENOENT if absent, EPROTO if incompatible). */
+int  stock_reopen(stock_table_t *t, const char *name);
 
 /* Readers: map an existing table read-only. 0 or -1 (errno ENOENT if absent). */
 int  stock_attach(stock_table_t *t, const char *name);

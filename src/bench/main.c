@@ -77,7 +77,9 @@ static void usage(void)
     fprintf(stderr,
             "usage: of-bench [-c config] oversell [--buyers N] [--stock S] [--product ID]\n"
             "                [--qty Q] [--threads T] [--url http://host:port] [--admin EMAIL]\n"
-            "                [--csv FILE]        (admin password: $OF_ADMIN_PASSWORD)\n");
+            "                [--csv FILE]        (admin password: $OF_ADMIN_PASSWORD)\n"
+            "       of-bench [-c config] load [--clients N] [--duration S] [--restock N]\n"
+            "                [--method tok_success] [--url http://host:port] [--csv FILE]\n");
     exit(2);
 }
 
@@ -126,30 +128,37 @@ typedef struct {
     char body[RESP_MAX];
 } http_resp_t;
 
-/* Blocking request for setup steps. 0 on any HTTP answer, -1 on network failure. */
-static int http_call(const char *method, const char *path, const char *body, const char *session,
-                     const char *csrf, http_resp_t *r)
+/* Blocking request, thread-safe. idem may be NULL. 0 on any HTTP answer, -1 on a network
+ * failure or a 15 s timeout. */
+static int http_call_idem(const char *method, const char *path, const char *body,
+                          const char *session, const char *csrf, const char *idem,
+                          http_resp_t *r)
 {
     int fd = socket(server->ai_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0 || connect(fd, server->ai_addr, server->ai_addrlen) != 0) {
-        if (fd >= 0)
-            close(fd);
+    if (fd < 0)
+        return -1;
+    struct timeval tv = {15, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (connect(fd, server->ai_addr, server->ai_addrlen) != 0) {
+        close(fd);
         return -1;
     }
     char req[2048];
     int n = snprintf(req, sizeof req,
                      "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
                      "Content-Type: application/json\r\nContent-Length: %zu\r\n"
-                     "%s%s%s%s%s%s\r\n%s",
+                     "%s%s%s%s%s%s%s%s%s\r\n%s",
                      method, path, o.host, body ? strlen(body) : 0,
                      session ? "Cookie: of_session=" : "", session ? session : "",
                      session ? "\r\n" : "", csrf ? "X-CSRF-Token: " : "", csrf ? csrf : "",
-                     csrf ? "\r\n" : "", body ? body : "");
+                     csrf ? "\r\n" : "", idem ? "Idempotency-Key: " : "", idem ? idem : "",
+                     idem ? "\r\n" : "", body ? body : "");
     if (n < 0 || (size_t)n >= sizeof req || write(fd, req, (size_t)n) != n) {
         close(fd);
         return -1;
     }
-    static char raw[64 * 1024];
+    char raw[32 * 1024];
     size_t got = 0;
     ssize_t k;
     while (got < sizeof raw - 1 && (k = read(fd, raw + got, sizeof raw - 1 - got)) > 0)
@@ -173,6 +182,12 @@ static int http_call(const char *method, const char *path, const char *body, con
     if (b)
         snprintf(r->body, sizeof r->body, "%s", b + 4);
     return 0;
+}
+
+static int http_call(const char *method, const char *path, const char *body, const char *session,
+                     const char *csrf, http_resp_t *r)
+{
+    return http_call_idem(method, path, body, session, csrf, NULL, r);
 }
 
 /* Pull "key":"value" or "key":number out of a JSON body (good enough for known keys). */
@@ -210,7 +225,7 @@ typedef struct {
 
 static buyer_t *buyers;
 
-static int create_buyers(db_t *db, const char *run_id)
+static int create_buyers(db_t *db, const char *run_id, bool with_cart)
 {
     char hash[crypto_pwhash_STRBYTES];
     if (store_hash_password("bench-password", hash, sizeof hash) != 0)
@@ -251,7 +266,8 @@ static int create_buyers(db_t *db, const char *run_id)
             db_exec(db, "INSERT INTO carts (user_id) VALUES (?)", "i", uid) != 1)
             return -1;
         int64_t cart = (int64_t)db_insert_id(db);
-        if (db_exec(db, "INSERT INTO cart_items (cart_id, product_id, qty) VALUES (?, ?, ?)", "iii",
+        if (with_cart &&
+            db_exec(db, "INSERT INTO cart_items (cart_id, product_id, qty) VALUES (?, ?, ?)", "iii",
                     cart, o.product, (int64_t)o.qty) != 1)
             return -1;
 
@@ -478,7 +494,7 @@ static int cmd_oversell(int argc, char **argv)
            mode, o.buyers, o.qty, o.qty > 1 ? "s" : "", (long long)o.product, o.stock, o.threads);
     printf("  setting up buyers, sessions and carts...\n");
     fflush(stdout);
-    if (create_buyers(db, run_id) != 0) {
+    if (create_buyers(db, run_id, true) != 0) {
         fprintf(stderr, "of-bench: creating buyers: %s\n", db_error(db));
         return 1;
     }
@@ -558,6 +574,9 @@ static int cmd_oversell(int argc, char **argv)
     buf_init(&inv);
     int64_t ledger_oversold = 0;
     int bad = store_check_invariants(db, tp, &inv, &ledger_oversold);
+    int bad_orders = bad < 0 ? -1 : store_check_orders(db, &inv, 30);
+    if (bad >= 0 && bad_orders != 0)
+        bad += bad_orders < 0 ? 1 : bad_orders;
 
     printf("\n  results\n");
     printf("    orders accepted (201)    %d\n", ok);
@@ -625,6 +644,336 @@ static int cmd_oversell(int argc, char **argv)
     return pass ? 0 : 1;
 }
 
+/* ------------------------------------------------------------------ sustained load */
+/*
+ * of-bench load: CLIENTS customers shop continuously for DURATION seconds (add a random
+ * product, check out, repeat). Built for the chaos test: when of-core is killed, the
+ * requests in flight fail (502/503 or a dropped connection) and the client retries the
+ * same checkout with the SAME Idempotency-Key, so a checkout that actually committed
+ * just before the crash is answered 200 with the existing order instead of being
+ * placed twice. Every second's successes and failures are recorded, so the outage is
+ * visible; at the end the run waits for payments to settle and checks every invariant.
+ */
+#define LOAD_MAX_SECONDS 3600
+#define LOAD_MAX_PRODUCTS 512
+
+static int64_t          load_products[LOAD_MAX_PRODUCTS];
+static int              load_nproducts;
+static int              load_duration_s = 20;
+static const char      *load_method = "tok_success";
+static int64_t          load_t0;
+static _Atomic uint32_t sec_ok[LOAD_MAX_SECONDS], sec_fail[LOAD_MAX_SECONDS];
+static _Atomic uint64_t n_created, n_replayed, n_soldout, n_failed_attempts, n_gave_up,
+                        n_other, n_checkouts;
+
+typedef struct {
+    int      idx;
+    int64_t *lat;
+    size_t   nlat, cap;
+} client_t;
+
+static void tick(bool ok)
+{
+    int64_t sec = (of_now_us() - load_t0) / 1000000;
+    if (sec >= 0 && sec < LOAD_MAX_SECONDS)
+        atomic_fetch_add(ok ? &sec_ok[sec] : &sec_fail[sec], 1);
+}
+
+static void pause_ms(int ms)
+{
+    struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+static void *load_client(void *arg)
+{
+    client_t *cl = arg;
+    buyer_t *b = &buyers[cl->idx];
+    unsigned seed = (unsigned)(cl->idx * 7919 + 17);
+    int64_t deadline = load_t0 + (int64_t)load_duration_s * 1000000;
+    http_resp_t r;
+    char body[96], path[64];
+
+    while (of_now_us() < deadline) {
+        int64_t pid = load_products[rand_r(&seed) % load_nproducts];
+        snprintf(body, sizeof body, "{\"product_id\":%lld,\"qty\":1}", (long long)pid);
+        if (http_call("POST", "/api/cart/items", body, b->token, b->csrf, &r) != 0 ||
+            r.status != 200) {
+            tick(false);
+            pause_ms(200);
+            continue;
+        }
+        tick(true);
+
+        /* One checkout attempt = one Idempotency-Key, however many retries it takes. */
+        unsigned char rnd[16];
+        char key[33];
+        of_random_bytes(rnd, sizeof rnd);
+        of_hex(key, rnd, sizeof rnd);
+        snprintf(body, sizeof body, "{\"payment_method\":\"%s\"}", load_method);
+        atomic_fetch_add(&n_checkouts, 1);
+        int64_t t0 = of_now_us();
+        bool done = false;
+        for (int attempt = 0; attempt < 40 && !done; attempt++) {
+            int rc = http_call_idem("POST", "/api/checkout", body, b->token, b->csrf, key, &r);
+            bool conflict = rc == 0 && r.status == 409 && strstr(r.body, "\"conflict\"");
+            if (rc != 0 || r.status == 502 || r.status == 503 || conflict) {
+                /* Engine restarting, or a MySQL deadlock ("please retry"): same key again. */
+                tick(false);
+                atomic_fetch_add(&n_failed_attempts, 1);
+                pause_ms(200);
+                continue;
+            }
+            tick(true);
+            done = true;
+            if (r.status == 201) {
+                atomic_fetch_add(&n_created, 1);
+            } else if (r.status == 200) {
+                atomic_fetch_add(&n_replayed, 1); /* it had committed before the crash */
+            } else if (r.status == 409) {
+                atomic_fetch_add(&n_soldout, 1);
+            } else {
+                atomic_fetch_add(&n_other, 1);
+            }
+            if (r.status == 201 || r.status == 200) {
+                if (cl->nlat == cl->cap) {
+                    size_t cap = cl->cap ? cl->cap * 2 : 256;
+                    int64_t *p = realloc(cl->lat, cap * sizeof *p);
+                    if (p) {
+                        cl->lat = p;
+                        cl->cap = cap;
+                    }
+                }
+                if (cl->nlat < cl->cap)
+                    cl->lat[cl->nlat++] = of_now_us() - t0;
+            }
+        }
+        if (!done)
+            atomic_fetch_add(&n_gave_up, 1);
+        /* Leave the cart empty for the next round, whatever happened. */
+        snprintf(path, sizeof path, "/api/cart/items/%lld", (long long)pid);
+        http_call("DELETE", path, NULL, b->token, b->csrf, &r);
+    }
+    return NULL;
+}
+
+static int cmd_load(int argc, char **argv)
+{
+    int clients = 50, restock = 1000;
+    const char *csv = NULL;
+    for (int i = 0; i + 1 < argc; i += 2) {
+        int64_t n;
+        if (strcmp(argv[i], "--clients") == 0 && of_parse_i64(argv[i + 1], 1, 2000, &n) == 0)
+            clients = (int)n;
+        else if (strcmp(argv[i], "--duration") == 0 &&
+                 of_parse_i64(argv[i + 1], 1, LOAD_MAX_SECONDS - 60, &n) == 0)
+            load_duration_s = (int)n;
+        else if (strcmp(argv[i], "--restock") == 0 && of_parse_i64(argv[i + 1], 0, 1000000, &n) == 0)
+            restock = (int)n;
+        else if (strcmp(argv[i], "--method") == 0)
+            load_method = argv[i + 1];
+        else if (strcmp(argv[i], "--url") == 0 && parse_url(argv[i + 1]) == 0)
+            ;
+        else if (strcmp(argv[i], "--csv") == 0)
+            csv = argv[i + 1];
+        else
+            usage();
+    }
+    if (argc % 2)
+        usage();
+    o.admin_password = getenv("OF_ADMIN_PASSWORD") ? getenv("OF_ADMIN_PASSWORD") : "admin12345";
+    o.buyers = clients;
+    if (sodium_init() < 0 || resolve() != 0)
+        return 1;
+
+    char err[256];
+    db_t *db = db_connect(&cfg, err, sizeof err);
+    if (!db) {
+        fprintf(stderr, "of-bench: database: %s\n", err);
+        return 1;
+    }
+
+    /* Admin session: mode, TTL, and restocking through the API (keeps shm exact). */
+    http_resp_t r;
+    char body[512], csrf[80], mode[32] = "?", ttl_s[16] = "120";
+    snprintf(body, sizeof body, "{\"email\":\"%s\",\"password\":\"%s\"}", o.admin_email,
+             o.admin_password);
+    if (http_call("POST", "/api/auth/login", body, NULL, NULL, &r) != 0 || r.status != 200 ||
+        json_find(r.body, "csrf_token", csrf, sizeof csrf) != 0) {
+        fprintf(stderr, "of-bench: admin login failed (is the stack running?)\n");
+        return 1;
+    }
+    char admin_cookie[160];
+    snprintf(admin_cookie, sizeof admin_cookie, "%s", r.cookie);
+    if (http_call("GET", "/api/admin/system", NULL, admin_cookie, NULL, &r) == 0 && r.status == 200) {
+        json_find(r.body, "stock_mode", mode, sizeof mode);
+        json_find(r.body, "reservation_ttl_s", ttl_s, sizeof ttl_s);
+    }
+
+    db_res_t res;
+    if (db_query(db, &res,
+                 "SELECT p.id, i.stock_on_hand FROM products p JOIN inventory i "
+                 "ON i.product_id = p.id WHERE p.active = 1 ORDER BY p.id", "") != 0)
+        return 1;
+    while (load_nproducts < LOAD_MAX_PRODUCTS && db_fetch(&res) == 1) {
+        int64_t id = db_int(&res, 0), have = db_int(&res, 1);
+        load_products[load_nproducts++] = id;
+        if (restock > 0 && have < restock) {
+            char path[96];
+            snprintf(path, sizeof path, "/api/admin/products/%lld/stock", (long long)id);
+            snprintf(body, sizeof body, "{\"delta\":%lld,\"reason\":\"restock\"}",
+                     (long long)(restock - have));
+            http_call("POST", path, body, admin_cookie, csrf, &r);
+        }
+    }
+    db_res_free(&res);
+    if (load_nproducts == 0) {
+        fprintf(stderr, "of-bench: no active products\n");
+        return 1;
+    }
+
+    char run_id[24];
+    snprintf(run_id, sizeof run_id, "L%lld", (long long)time(NULL));
+    buyers = calloc((size_t)clients, sizeof *buyers);
+    if (create_buyers(db, run_id, false) != 0) {
+        fprintf(stderr, "of-bench: creating buyers: %s\n", db_error(db));
+        return 1;
+    }
+    printf("of-bench load: mode %s, %d clients, %d s, %d products (restocked to %d), "
+           "payment %s\n", mode, clients, load_duration_s, load_nproducts, restock, load_method);
+    fflush(stdout);
+
+    load_t0 = of_now_us();
+    pthread_t *th = calloc((size_t)clients, sizeof *th);
+    client_t *cl = calloc((size_t)clients, sizeof *cl);
+    for (int i = 0; i < clients; i++) {
+        cl[i].idx = i;
+        pthread_create(&th[i], NULL, load_client, &cl[i]);
+    }
+    for (int i = 0; i < clients; i++)
+        pthread_join(th[i], NULL);
+    int seconds = (int)((of_now_us() - load_t0) / 1000000) + 1;
+    if (seconds > LOAD_MAX_SECONDS)
+        seconds = LOAD_MAX_SECONDS;
+
+    /* Outage: the longest run of seconds with failures and no success. */
+    int longest = 0, run = 0, out_start = -1, best_start = -1;
+    for (int s2 = 0; s2 < seconds; s2++) {
+        bool down = atomic_load(&sec_fail[s2]) > 0 && atomic_load(&sec_ok[s2]) == 0;
+        if (down) {
+            if (run == 0)
+                out_start = s2;
+            run++;
+            if (run > longest) {
+                longest = run;
+                best_start = out_start;
+            }
+        } else {
+            run = 0;
+        }
+    }
+
+    size_t nlat = 0;
+    for (int i = 0; i < clients; i++)
+        nlat += cl[i].nlat;
+    int64_t *lat = calloc(nlat ? nlat : 1, sizeof *lat);
+    size_t k = 0;
+    for (int i = 0; i < clients; i++)
+        for (size_t j = 0; j < cl[i].nlat; j++)
+            lat[k++] = cl[i].lat[j];
+    qsort(lat, nlat, sizeof *lat, cmp_i64);
+
+    printf("\n  results\n");
+    printf("    checkouts                %llu  (%.1f per second)\n",
+           (unsigned long long)atomic_load(&n_checkouts),
+           (double)atomic_load(&n_checkouts) / load_duration_s);
+    printf("    orders created (201)     %llu\n", (unsigned long long)atomic_load(&n_created));
+    printf("    replayed by key (200)    %llu   (committed just before a crash; not duplicated)\n",
+           (unsigned long long)atomic_load(&n_replayed));
+    printf("    sold out (409)           %llu\n", (unsigned long long)atomic_load(&n_soldout));
+    printf("    failed attempts retried  %llu   (502/503/connection errors during an outage)\n",
+           (unsigned long long)atomic_load(&n_failed_attempts));
+    printf("    gave up / other          %llu / %llu\n", (unsigned long long)atomic_load(&n_gave_up),
+           (unsigned long long)atomic_load(&n_other));
+    if (nlat)
+        printf("    checkout latency ms      p50 %.1f  p95 %.1f  p99 %.1f  max %.1f\n",
+               lat[nlat * 50 / 100] / 1000.0, lat[nlat * 95 / 100] / 1000.0,
+               lat[nlat * 99 / 100] / 1000.0, lat[nlat - 1] / 1000.0);
+    if (longest)
+        printf("    longest outage           %d s (from second %d)\n", longest, best_start);
+    else
+        printf("    longest outage           none\n");
+    printf("    timeline (ok/failed per second):");
+    for (int s2 = 0; s2 < seconds; s2++)
+        printf("%s%u/%u", s2 % 10 ? " " : "\n      ", atomic_load(&sec_ok[s2]),
+               atomic_load(&sec_fail[s2]));
+    printf("\n");
+
+    /* Let payments settle: every bench order paid or cancelled (bounded by the TTL). */
+    char like[64];
+    snprintf(like, sizeof like, "bench-%s-%%", run_id);
+    int64_t wait_until = of_now_us() + (atoll(ttl_s) + 15) * 1000000LL, pending = 0;
+    printf("\n  waiting for payments to settle...");
+    fflush(stdout);
+    do {
+        if (db_query_int(db, &pending,
+                         "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.user_id "
+                         "WHERE u.email LIKE ? AND o.status IN ('placed', 'payment_pending')",
+                         "s", like) < 0)
+            break;
+        if (pending)
+            pause_ms(500);
+    } while (pending && of_now_us() < wait_until);
+    printf(" %s\n", pending ? "timed out" : "done");
+
+    stock_table_t t;
+    const stock_table_t *tp = NULL;
+    if (strcmp(mode, "lockfree-shm") == 0 &&
+        stock_attach(&t, of_config_get(&cfg, "core.shm_name", "/orderforge")) == 0)
+        tp = &t;
+    buf_t inv;
+    buf_init(&inv);
+    int64_t oversold = 0;
+    int bad = store_check_invariants(db, tp, &inv, &oversold);
+    int bad_orders = bad < 0 ? -1 : store_check_orders(db, &inv, 30);
+    printf("\n  invariants%s\n", tp ? " (MySQL + shared memory + orders)" : " (MySQL + orders)");
+    if (inv.data)
+        for (char *line = strtok(inv.data, "\n"); line; line = strtok(NULL, "\n"))
+            printf("    %s\n", line);
+    bool pass = bad == 0 && bad_orders == 0 && oversold == 0;
+    printf("\n  %s\n", pass ? "PASS: every invariant holds" : "FAIL: see above");
+
+    if (csv) {
+        FILE *f = fopen(csv, "a");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            if (ftell(f) == 0)
+                fprintf(f, "mode,clients,duration_s,checkouts,created,replayed,sold_out,"
+                           "failed_attempts,gave_up,p50_ms,p99_ms,longest_outage_s,pass\n");
+            fprintf(f, "%s,%d,%d,%llu,%llu,%llu,%llu,%llu,%llu,%.1f,%.1f,%d,%d\n", mode, clients,
+                    load_duration_s, (unsigned long long)atomic_load(&n_checkouts),
+                    (unsigned long long)atomic_load(&n_created),
+                    (unsigned long long)atomic_load(&n_replayed),
+                    (unsigned long long)atomic_load(&n_soldout),
+                    (unsigned long long)atomic_load(&n_failed_attempts),
+                    (unsigned long long)atomic_load(&n_gave_up),
+                    nlat ? lat[nlat / 2] / 1000.0 : 0, nlat ? lat[nlat * 99 / 100] / 1000.0 : 0,
+                    longest, pass);
+            fclose(f);
+        }
+    }
+    buf_free(&inv);
+    if (tp)
+        stock_close(&t, false);
+    for (int i = 0; i < clients; i++)
+        free(cl[i].lat);
+    free(cl);
+    free(th);
+    free(lat);
+    db_close(db);
+    return pass ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *conf_path = "conf/orderforge.conf";
@@ -647,6 +996,8 @@ int main(int argc, char **argv)
 
     if (strcmp(argv[optind], "oversell") == 0)
         return cmd_oversell(argc - optind - 1, argv + optind + 1);
+    if (strcmp(argv[optind], "load") == 0)
+        return cmd_load(argc - optind - 1, argv + optind + 1);
     usage();
     return 2;
 }

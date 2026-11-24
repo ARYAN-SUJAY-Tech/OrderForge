@@ -14,9 +14,9 @@ Apache.
 | 0 | Setup and spikes: Makefile, sanitizer builds, config, logger, CRC32, three spikes | done |
 | 1 | Baseline store: schema, auth, catalogue, cart, naive checkout, storefront and admin UI | done (gate 1) |
 | 2 | Core engine: of-core, binary protocol, lock-free CAS reservation, three stock modes, of-bench | done (gate 2) |
-| 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | **done** (gate 3) |
-| 4 | WAL, crash recovery, supervisor, metrics | next |
-| 5 | Hardening | |
+| 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | done (gate 3) |
+| 4 | Write-ahead log, crash recovery, of-supervisor, metrics endpoint, of-ctl status, chaos test | **done** (gate 4) |
+| 5 | Hardening | next |
 | 6 | Benchmarks and chaos tests | |
 | 7 | Documentation, video, slides | |
 
@@ -28,7 +28,8 @@ sudo ./scripts/setup-db.sh        # database, user, conf/orderforge.conf (0600)
 make && make test
 ./scripts/load-db.sh              # schema, 24 products, admin and demo accounts
 sudo ./scripts/install-site.sh    # web/ -> /var/www/orderforge, vhost on :8080
-scripts/run.sh                    # of-core, of-pay, of-report, of-api; Ctrl-C stops all
+scripts/run.sh                    # of-supervisor starts and watches every daemon; Ctrl-C stops
+build/debug/of-ctl status         # (another terminal) daemons, engine, WAL, crash recovery
 ```
 
 Then open <http://localhost:8080/>.
@@ -43,6 +44,7 @@ Details and troubleshooting: [docs/install.md](docs/install.md).
 ## Architecture
 
 ```
+                                 of-supervisor (restarts, reload, ordered drain)
 Browser → Apache → of-api (pre-forked FastCGI) → Unix socket, binary frames → of-core → MySQL
                                                                      │          │   ▲
                                           POSIX shared-memory stock table (CAS) │   └── of-report
@@ -75,8 +77,19 @@ Browser → Apache → of-api (pre-forked FastCGI) → Unix socket, binary frame
   - Checkout is idempotent via the `Idempotency-Key` header.
 - **of-report**: periodic sales aggregation and CSV files, each written atomically with
   `fsync` and `rename()`; feeds the admin dashboard.
-- **of-ctl**: `useradd` and `invariants`. The invariant check covers the stock ledger
-  and, read-only, compares shared memory with MySQL.
+- **Crash recovery:**
+  - The shared-memory stock table survives a `kill -9` of of-core.
+  - A write-ahead log, with group commit and CRC-checked records, records every
+    in-flight reservation before MySQL is touched.
+  - On restart, the core resolves each in-flight reservation by asking MySQL whether
+    that transaction committed, then reconciles every product.
+- **of-supervisor:** starts every daemon in its own process group, restarts crashes
+  with backoff, and gives up on a crash loop ("degraded"). SIGHUP reloads settings;
+  SIGTERM stops everything in order.
+- **of-ctl**: `status`, `metrics`, `invariants`, `stuck`, `reload`, `stop`, `useradd`.
+  It reads shared memory read-only and never calls the core.
+- **Metrics:** `/api/metrics` in Prometheus format, localhost only, with a latency
+  histogram and per-product live stock.
 - **of-bench**: an epoll load generator with a barrier-synchronised rush, latency
   percentiles, invariant checks and CSV output.
 
@@ -96,7 +109,7 @@ scripts/oversell-experiment.sh     # resets the DB and runs all three stock mode
 
 The lock-free mode rejects the 950 losing buyers with one compare-and-swap each, without
 touching MySQL. Method, hardware and analysis are in
-[docs/design.md](docs/design.md#10-results-so-far).
+[docs/design.md](docs/design.md#11-results-so-far).
 
 ## Payments and order tracking (gate 3)
 
@@ -108,6 +121,21 @@ TTL=4 tests/integration/payment_test.sh                            # 56 checks
 The test covers every gateway outcome: approve, decline, silence, duplicate reply, and
 late reply after expiry. It also covers idempotent retries, customer cancel and refund,
 admin pack, ship and deliver, illegal transitions, stock returns and the reports API.
+
+## Crash test (gate 4)
+
+```sh
+scripts/run.sh                       # terminal 1
+scripts/chaos.sh                     # terminal 2: kill -9 of-core under 50 shoppers
+KILLS=3 DURATION=40 scripts/chaos.sh
+```
+
+| Load | Kills | Back to serving | In-flight reservations resolved | Invariants |
+|---|---|---|---|---|
+| 230 checkouts/s | 3 × `kill -9 of-core` | 1.37 s, 1.44 s, 1.40 s | 6 committed, 8 released (MySQL decides) | all pass |
+
+No checkout was lost or duplicated. A checkout that committed just before the crash is
+answered "already placed" when the client retries it with the same key.
 
 ## Documentation
 

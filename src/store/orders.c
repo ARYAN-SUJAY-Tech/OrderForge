@@ -147,6 +147,54 @@ static bool replay_existing(ctx_t *c, const char *scoped_key)
     return true;
 }
 
+/* ---- the shared-memory reservation and its write-ahead log records -------------------
+ * Order of events for a lockfree-shm checkout:
+ *   CAS-reserve in shared memory -> RESERVE(txid) durable in the WAL -> MySQL transaction
+ *   (the order row stores wal_txid) -> COMMIT(txid) or RELEASE(txid).
+ * If of-core dies anywhere in between, recovery finds the RESERVE without an outcome and
+ * looks up orders.wal_txid: found means MySQL committed (keep the units), not found means
+ * MySQL rolled back (give them back). */
+
+static void release_held(ctx_t *c, stock_line_t *held, size_t nheld, uint64_t txid)
+{
+    if (!nheld)
+        return;
+    stock_release_all(c->s->stock, held, nheld);
+    if (txid && c->s->wal) {
+        wal_rec_t r = {.type = WAL_RELEASE, .txid = txid};
+        wal_append(c->s->wal, &r); /* no wait: a lost RELEASE is resolved by recovery */
+    }
+}
+
+static void commit_held(ctx_t *c, stock_line_t *held, size_t nheld, uint64_t txid,
+                        int64_t order_id)
+{
+    if (!nheld)
+        return;
+    stock_commit_all(c->s->stock, held, nheld);
+    if (txid && c->s->wal) {
+        wal_rec_t r = {.type = WAL_COMMIT, .txid = txid, .order_id = (uint64_t)order_id};
+        wal_append(c->s->wal, &r); /* no wait: MySQL already holds the truth */
+    }
+}
+
+/* Make the reservation durable before MySQL is touched. 0, or -1 if the log failed. */
+static int log_reserve(ctx_t *c, const stock_line_t *held, size_t nheld, uint64_t *txid)
+{
+    *txid = 0;
+    if (!c->s->wal || !c->s->next_txid)
+        return 0;
+    wal_rec_t r = {.type = WAL_RESERVE, .nlines = (uint32_t)nheld};
+    r.txid = atomic_fetch_add(c->s->next_txid, 1);
+    for (size_t i = 0; i < nheld && i < WAL_MAX_LINES; i++)
+        r.lines[i] = held[i];
+    uint64_t seq = wal_append(c->s->wal, &r);
+    if (seq == 0 || wal_wait(c->s->wal, seq) != 0)
+        return -1;
+    *txid = r.txid;
+    return 0;
+}
+
 /*
  * POST /api/checkout   body (optional): {"payment_method": "tok_success"}
  *                      header (optional): Idempotency-Key: <8..64 chars>
@@ -162,6 +210,7 @@ void h_checkout(ctx_t *c)
     static _Thread_local stock_line_t held[CHECKOUT_MAX_LINES];
     size_t n = 0, nheld = 0;
     int64_t total = 0;
+    uint64_t txid = 0;
 
     const char *method = "tok_success";
     if (c->req->body_len > 0) {
@@ -250,17 +299,24 @@ void h_checkout(ctx_t *c)
             return;
         }
         nheld = n;
+        if (log_reserve(c, held, nheld, &txid) != 0) {
+            (void)db_rollback(c->db);
+            stock_release_all(c->s->stock, held, nheld);
+            LOG_ERROR("wal", "write-ahead log unavailable; refusing checkout");
+            resp_error(c, 503, "durability", "the store cannot record orders right now");
+            return;
+        }
     }
 
     if (db_exec(c->db,
-                "INSERT INTO orders (user_id, status, total_paise, idempotency_key) "
-                "VALUES (?, 'placed', ?, ?)",
-                "iis", c->user.id, total, scoped_key[0] ? scoped_key : NULL) != 1) {
+                "INSERT INTO orders (user_id, status, total_paise, idempotency_key, wal_txid) "
+                "VALUES (?, 'placed', ?, ?, ?)",
+                "iisi", c->user.id, total, scoped_key[0] ? scoped_key : NULL,
+                txid ? (int64_t)txid : DB_NULL_INT) != 1) {
         if (db_errno(c->db) == DB_ER_DUP_ENTRY && scoped_key[0]) {
             /* The same key won a race on another worker: give back, answer with theirs. */
             (void)db_rollback(c->db);
-            if (nheld)
-                stock_release_all(c->s->stock, held, nheld);
+            release_held(c, held, nheld, txid);
             if (!replay_existing(c, scoped_key))
                 resp_error(c, 409, "conflict", "please retry");
             return;
@@ -280,8 +336,7 @@ void h_checkout(ctx_t *c)
             goto db_failed;
         if (rc == 0) {
             (void)db_rollback(c->db);
-            if (nheld)
-                stock_release_all(c->s->stock, held, nheld);
+            release_held(c, held, nheld, txid);
             STORE_METRIC_ADD(c->s, orders_failed, 1);
             if (have >= 0)
                 resp_error(c, 409, "out_of_stock", "only %lld left of %s", (long long)have,
@@ -318,8 +373,7 @@ void h_checkout(ctx_t *c)
         goto db_failed;
 
     /* Durable in MySQL: the shared-memory reservation is now held by the order itself. */
-    if (nheld)
-        stock_commit_all(c->s->stock, held, nheld);
+    commit_held(c, held, nheld, txid, order_id);
     STORE_METRIC_ADD(c->s, orders_total, 1);
 
     /* Hand the payment to of-pay. If that fails the order stays payment_pending and the
@@ -348,8 +402,7 @@ void h_checkout(ctx_t *c)
 db_failed:
     /* fail_tx rolls back; whatever was reserved in shared memory goes back on the shelf. */
     fail_tx(c);
-    if (nheld)
-        stock_release_all(c->s->stock, held, nheld);
+    release_held(c, held, nheld, txid);
 }
 
 int render_order(ctx_t *c, int64_t order_id, int64_t owner_only)

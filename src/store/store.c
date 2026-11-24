@@ -12,6 +12,7 @@
 #include "common/log.h"
 #include "common/util.h"
 
+#include <pthread.h>
 #include <sodium.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -84,6 +85,20 @@ int stock_mode_parse(const char *s)
     return -1;
 }
 
+static pthread_once_t dummy_once = PTHREAD_ONCE_INIT;
+static char           dummy_hash_g[128];
+
+static void make_dummy_hash(void)
+{
+    unsigned char junk[16];
+    char junk_hex[33];
+    if (of_random_bytes(junk, sizeof junk) != 0)
+        return;
+    of_hex(junk_hex, junk, sizeof junk);
+    if (store_hash_password(junk_hex, dummy_hash_g, sizeof dummy_hash_g) != 0)
+        dummy_hash_g[0] = '\0';
+}
+
 int store_init(store_t *s, const of_config_t *cfg, stock_table_t *stock, int mode_override,
                char *err, size_t errlen)
 {
@@ -121,18 +136,14 @@ int store_init(store_t *s, const of_config_t *cfg, stock_table_t *stock, int mod
     s->cookie_secure = strcmp(of_config_get(cfg, "auth.cookie_secure", "0"), "1") == 0;
 
     /* A hash to verify against when the email is unknown, so a login attempt takes the
-     * same time whether or not the account exists. */
-    unsigned char junk[16];
-    char junk_hex[33];
-    if (of_random_bytes(junk, sizeof junk) != 0) {
-        snprintf(err, errlen, "getrandom failed");
-        return -1;
-    }
-    of_hex(junk_hex, junk, sizeof junk);
-    if (store_hash_password(junk_hex, s->dummy_hash, sizeof s->dummy_hash) != 0) {
+     * same time whether or not the account exists. Computed once per process: Argon2id
+     * costs 64 MiB and ~0.1 s, and of-core creates a store for every thread. */
+    pthread_once(&dummy_once, make_dummy_hash);
+    if (!dummy_hash_g[0]) {
         snprintf(err, errlen, "argon2id hashing failed (out of memory?)");
         return -1;
     }
+    snprintf(s->dummy_hash, sizeof s->dummy_hash, "%s", dummy_hash_g);
 
     s->db = db_connect(cfg, err, errlen);
     return s->db ? 0 : -1;
@@ -454,4 +465,76 @@ void store_handle(store_t *s, const of_req_t *req, of_resp_t *resp)
 
     if (buf_failed(&resp->body))
         resp_error(&c, 500, "internal", "response too large");
+}
+
+/* ------------------------------------------------------------------ order invariants */
+
+typedef struct {
+    const char *what;
+    const char *sql; /* selects offending order ids; may take grace_s as its one parameter */
+    bool        uses_grace;
+} order_check_t;
+
+static const order_check_t order_checks[] = {
+    {"unpaid orders past their reservation deadline",
+     "SELECT DISTINCT o.id FROM orders o JOIN reservations r ON r.order_id = o.id "
+     "WHERE o.status IN ('placed', 'payment_pending') AND r.state = 'active' "
+     "  AND r.expires_at < NOW(3) - INTERVAL ? SECOND ORDER BY o.id LIMIT 20",
+     true},
+    {"unpaid orders with no active reservation (could never expire)",
+     "SELECT o.id FROM orders o WHERE o.status IN ('placed', 'payment_pending') "
+     "  AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.order_id = o.id "
+     "                  AND r.state = 'active') ORDER BY o.id LIMIT 20",
+     false},
+    {"paid-or-later orders without exactly one successful payment",
+     "SELECT o.id FROM orders o WHERE o.status IN ('paid', 'packed', 'shipped', 'delivered') "
+     "  AND (SELECT COUNT(*) FROM payments p WHERE p.order_id = o.id "
+     "       AND p.status = 'succeeded') <> 1 ORDER BY o.id LIMIT 20",
+     false},
+    {"orders whose timeline is incomplete",
+     "SELECT o.id FROM orders o WHERE NOT EXISTS (SELECT 1 FROM order_events e "
+     "    WHERE e.order_id = o.id AND e.to_state = 'placed') "
+     "  OR o.status <> (SELECT e.to_state FROM order_events e WHERE e.order_id = o.id "
+     "                  ORDER BY e.id DESC LIMIT 1) ORDER BY o.id LIMIT 20",
+     false},
+    {"reservations that disagree with their order's state",
+     "SELECT DISTINCT o.id FROM reservations r JOIN orders o ON o.id = r.order_id "
+     "WHERE (r.state = 'active' AND o.status NOT IN ('placed', 'payment_pending')) "
+     "   OR (r.state = 'committed' AND o.status NOT IN ('paid', 'packed', 'shipped', 'delivered')) "
+     "   OR (r.state = 'released' AND o.status NOT IN ('cancelled', 'refunded')) "
+     "ORDER BY o.id LIMIT 20",
+     false},
+    {"refunded orders still holding a successful payment",
+     "SELECT o.id FROM orders o JOIN payments p ON p.order_id = o.id "
+     "WHERE o.status = 'refunded' AND p.status = 'succeeded' ORDER BY o.id LIMIT 20",
+     false},
+};
+
+int store_check_orders(db_t *db, buf_t *out, int64_t grace_s)
+{
+    int failed = 0;
+    for (size_t i = 0; i < sizeof order_checks / sizeof order_checks[0]; i++) {
+        const order_check_t *k = &order_checks[i];
+        db_res_t r;
+        int rc = k->uses_grace ? db_query(db, &r, k->sql, "i", grace_s)
+                               : db_query(db, &r, k->sql, "");
+        if (rc != 0)
+            return -1;
+        char ids[160] = "";
+        int n = 0;
+        while (db_fetch(&r) == 1) {
+            if (strlen(ids) < sizeof ids - 24)
+                snprintf(ids + strlen(ids), sizeof ids - strlen(ids), "%s#%s", n ? " " : "",
+                         db_str(&r, 0));
+            n++;
+        }
+        db_res_free(&r);
+        if (n == 0) {
+            buf_printf(out, "ok    no %s\n", k->what);
+        } else {
+            failed++;
+            buf_printf(out, "FAIL  %d %s%s: %s\n", n, k->what, n == 20 ? " (first 20)" : "", ids);
+        }
+    }
+    return failed;
 }

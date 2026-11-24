@@ -132,3 +132,17 @@ Each row shows only the moves allowed from its current state:
   - payment outcomes (sent, approved, declined, duplicates ignored, forged messages
     rejected, late payments refunded);
   - expired reservations.
+
+## Operators
+
+The daemons run under `of-supervisor` (`scripts/run.sh`), which restarts any that
+crash. Customers notice a crash of the engine only as a second or two of "please retry".
+A retried checkout never creates a second order.
+
+| Command | What it does |
+|---|---|
+| `of-ctl status` | Each daemon's state and restarts, live traffic and latency, payment outcomes, write-ahead-log activity and crash-recovery counters |
+| `of-ctl invariants` | Proves stock, payments and timelines are consistent |
+| `of-ctl stuck` | Lists any order that should have moved on |
+| `of-ctl reload` | Applies configuration changes (log level, timeouts, gateway behaviour, report interval) and retries a daemon marked failed |
+| `of-ctl stop` | Shuts everything down cleanly, finishing requests in progress |

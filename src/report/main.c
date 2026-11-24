@@ -302,6 +302,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    char pid_path[512];
+    pid_t holder = 0;
+    of_pidfile_path(&cfg, "of-report", pid_path, sizeof pid_path);
+    int pid_fd = once ? 0 : of_pidfile_acquire(pid_path, &holder);
+    if (pid_fd < 0) {
+        fprintf(stderr, "of-report: already running (pid %d holds %s)\n", (int)holder, pid_path);
+        return 1;
+    }
+
     db_t *db = db_connect(&cfg, err, sizeof err);
     if (!db) {
         fprintf(stderr, "of-report: database: %s\n", err);
@@ -358,7 +367,19 @@ int main(int argc, char **argv)
                     return 0;
                 }
                 of_log_reopen();
-                LOG_INFO("reload", "SIGHUP: regenerating now");
+                of_config_t fresh;
+                int okr1, okr2;
+                if (of_config_load(&fresh, conf_path, err, sizeof err) == 0) {
+                    long iv = of_config_get_long(&fresh, "report.interval_s", 10, 1, 86400, &okr1);
+                    long dd = of_config_get_long(&fresh, "report.days", 30, 1, 366, &okr2);
+                    if (okr1 && okr2) {
+                        struct itimerspec nt = {{iv, 0}, {iv, 0}};
+                        timerfd_settime(tfd, 0, &nt, NULL);
+                        window_days = dd;
+                    }
+                    LOG_INFO("reload", "SIGHUP: every %ld s, %lld-day window; regenerating now",
+                             iv, (long long)window_days);
+                }
             }
             if (db_broken(db)) {
                 db_t *fresh = db_connect(&cfg, err, sizeof err);

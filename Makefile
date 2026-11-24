@@ -82,12 +82,14 @@ PAY_SRC := $(wildcard src/pay/*.c)
 PAY_OBJ := $(PAY_SRC:%.c=$(BUILD)/%.o)
 REPORT_SRC := $(wildcard src/report/*.c)
 REPORT_OBJ := $(REPORT_SRC:%.c=$(BUILD)/%.o)
+SUP_SRC := $(wildcard src/supervisor/*.c)
+SUP_OBJ := $(SUP_SRC:%.c=$(BUILD)/%.o)
 $(API_OBJ): CFLAGS += $(FCGI_CFLAGS)
 $(CTL_OBJ) $(CORE_OBJ) $(BENCH_OBJ) $(REPORT_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
 $(PAY_OBJ): CFLAGS += $(SODIUM_CFLAGS)
 
-BINS := $(BUILD)/of-core $(BUILD)/of-api $(BUILD)/of-pay $(BUILD)/of-report \
-        $(BUILD)/of-ctl $(BUILD)/of-bench
+BINS := $(BUILD)/of-supervisor $(BUILD)/of-core $(BUILD)/of-api $(BUILD)/of-pay \
+        $(BUILD)/of-report $(BUILD)/of-ctl $(BUILD)/of-bench
 
 # ---------------------------------------------------------------- tests
 TEST_SRC := $(wildcard tests/unit/test_*.c)
@@ -136,6 +138,10 @@ $(BUILD)/of-core: $(CORE_OBJ) $(LIBSTORE) $(LIBCOMMON)
 # of-pay needs no database: only the message queues and libsodium for the HMAC.
 $(BUILD)/of-pay: $(PAY_OBJ) $(LIBCOMMON)
 	$(CC) $(PAY_OBJ) -o $@ $(LDFLAGS) $(LIBCOMMON) $(SODIUM_LIBS) $(LDLIBS)
+
+# of-supervisor only forks, execs and waits: no database, no crypto.
+$(BUILD)/of-supervisor: $(SUP_OBJ) $(LIBCOMMON)
+	$(CC) $(SUP_OBJ) -o $@ $(LDFLAGS) $(LIBCOMMON) $(LDLIBS)
 
 $(BUILD)/of-report: $(REPORT_OBJ) $(LIBSTORE) $(LIBCOMMON)
 	$(CC) $(REPORT_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
@@ -189,4 +195,5 @@ clean:
 	rm -rf build
 
 -include $(COMMON_OBJ:.o=.d) $(STORE_OBJ:.o=.d) $(API_OBJ:.o=.d) $(CTL_OBJ:.o=.d) \
-         $(CORE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(PAY_OBJ:.o=.d) $(REPORT_OBJ:.o=.d)
+         $(CORE_OBJ:.o=.d) $(BENCH_OBJ:.o=.d) $(PAY_OBJ:.o=.d) $(REPORT_OBJ:.o=.d) \
+         $(SUP_OBJ:.o=.d)

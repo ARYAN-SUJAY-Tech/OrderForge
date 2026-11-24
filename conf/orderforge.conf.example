@@ -10,6 +10,9 @@ db.password = CHANGE_ME
 db.name     = orderforge
 # Leave db.socket unset to use the client default (/var/run/mysqld/mysqld.sock).
 
+# ---- runtime files: pid files (flock-locked), supervisor status, by default the socket
+run.dir = run
+
 # ---- logging: one JSON-lines file per process in log.dir ("-" logs to stderr)
 log.dir   = run/log
 log.level = info
@@ -32,6 +35,14 @@ core.stock_capacity = 4096
 # core.allow_uid = 33
 # How often the reservation-expiry reaper runs (a timerfd in of-core).
 core.reaper_interval_ms = 1000
+# Threads applying payment replies (each with its own MySQL connection).
+core.payment_workers = 4
+# Write-ahead log for in-flight stock reservations (lockfree-shm): its file, how long
+# the flusher lingers to batch records into one fdatasync, and the size that triggers
+# compaction.
+core.wal_path      = run/of-core.wal
+core.wal_group_us  = 2000
+core.wal_max_bytes = 16777216
 
 # ---- of-api (pre-forked FastCGI workers behind Apache)
 api.listen  = 127.0.0.1:9000
@@ -74,6 +85,14 @@ pay.duplicate_pct  = 5
 report.dir        = run/reports
 report.interval_s = 10
 report.days       = 30
+
+# ---- of-supervisor (scripts/run.sh)
+# A daemon that crashes more than max_restarts times within window_s seconds is not
+# restarted again ("degraded") until `of-ctl reload`. stop_timeout_s: how long each
+# daemon may take to drain on shutdown before SIGKILL.
+supervisor.max_restarts   = 5
+supervisor.window_s       = 60
+supervisor.stop_timeout_s = 15
 
 # ---- authentication
 auth.session_ttl   = 86400

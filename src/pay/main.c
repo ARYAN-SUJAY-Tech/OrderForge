@@ -261,6 +261,30 @@ static void send_due(void)
 
 /* ------------------------------------------------------------------ main */
 
+/* Latency and outcome mix; re-read on SIGHUP. 0, or -1 (nothing changed) if invalid. */
+static int load_behaviour(const of_config_t *c)
+{
+    int ok[6];
+    int64_t mn = of_config_get_long(c, "pay.latency_min_ms", 20, 0, 60000, &ok[0]);
+    int64_t mx = of_config_get_long(c, "pay.latency_max_ms", 150, 0, 60000, &ok[1]);
+    int64_t sl = of_config_get_long(c, "pay.slow_ms", 180000, 0, 3600000, &ok[2]);
+    int de = (int)of_config_get_long(c, "pay.decline_pct", 10, 0, 100, &ok[3]);
+    int to = (int)of_config_get_long(c, "pay.timeout_pct", 5, 0, 100, &ok[4]);
+    int du = (int)of_config_get_long(c, "pay.duplicate_pct", 5, 0, 100, &ok[5]);
+    for (int i = 0; i < 6; i++)
+        if (!ok[i])
+            return -1;
+    if (mx < mn || de + to + du > 100)
+        return -1;
+    lat_min_ms = mn;
+    lat_max_ms = mx;
+    slow_ms = sl;
+    decline_pct = de;
+    timeout_pct = to;
+    duplicate_pct = du;
+    return 0;
+}
+
 static void usage(void)
 {
     fprintf(stderr, "usage: of-pay [-c config]\n");
@@ -289,19 +313,23 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int ok[7];
-    lat_min_ms = of_config_get_long(&cfg, "pay.latency_min_ms", 20, 0, 60000, &ok[0]);
-    lat_max_ms = of_config_get_long(&cfg, "pay.latency_max_ms", 150, 0, 60000, &ok[1]);
-    slow_ms = of_config_get_long(&cfg, "pay.slow_ms", 180000, 0, 3600000, &ok[2]);
-    decline_pct = (int)of_config_get_long(&cfg, "pay.decline_pct", 10, 0, 100, &ok[3]);
-    timeout_pct = (int)of_config_get_long(&cfg, "pay.timeout_pct", 5, 0, 100, &ok[4]);
-    duplicate_pct = (int)of_config_get_long(&cfg, "pay.duplicate_pct", 5, 0, 100, &ok[5]);
-    long maxmsg = of_config_get_long(&cfg, "pay.mq_maxmsg", 10, 1, 1000, &ok[6]);
-    for (int i = 0; i < 7; i++)
-        if (!ok[i] || lat_max_ms < lat_min_ms || decline_pct + timeout_pct + duplicate_pct > 100) {
-            fprintf(stderr, "of-pay: a pay.* setting is out of range\n");
-            return 1;
-        }
+    char pid_path[512];
+    pid_t holder = 0;
+    of_pidfile_path(&cfg, "of-pay", pid_path, sizeof pid_path);
+    if (of_pidfile_acquire(pid_path, &holder) < 0) {
+        fprintf(stderr, "of-pay: already running (pid %d holds %s)\n", (int)holder, pid_path);
+        return 1;
+    }
+    if (load_behaviour(&cfg) != 0) {
+        fprintf(stderr, "of-pay: a pay.* setting is out of range\n");
+        return 1;
+    }
+    int okm;
+    long maxmsg = of_config_get_long(&cfg, "pay.mq_maxmsg", 10, 1, 1000, &okm);
+    if (!okm) {
+        fprintf(stderr, "of-pay: pay.mq_maxmsg out of range\n");
+        return 1;
+    }
 
     heap = calloc(HEAP_MAX, sizeof *heap);
     idem = calloc(IDEM_SLOTS, sizeof *idem);
@@ -370,6 +398,16 @@ int main(int argc, char **argv)
                 while (read(sfd, &si, sizeof si) == sizeof si) {
                     if (si.ssi_signo == SIGHUP) {
                         of_log_reopen();
+                        of_config_t fresh;
+                        char e2[256];
+                        if (of_config_load(&fresh, conf_path, e2, sizeof e2) == 0 &&
+                            load_behaviour(&fresh) == 0)
+                            LOG_INFO("reload", "SIGHUP: latency %lld-%lld ms, slow %lld ms, "
+                                               "decline %d%% timeout %d%% duplicate %d%%",
+                                     (long long)lat_min_ms, (long long)lat_max_ms,
+                                     (long long)slow_ms, decline_pct, timeout_pct, duplicate_pct);
+                        else
+                            LOG_WARN("reload", "SIGHUP: config not reloaded (invalid)");
                         continue;
                     }
                     LOG_INFO("shutdown", "requests %llu approved %llu declined %llu silent %llu "

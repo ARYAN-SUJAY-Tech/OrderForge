@@ -114,3 +114,22 @@ see every order.
 
 Every admin change is recorded in `audit_log`. Every stock change is recorded in
 `stock_movements`.
+
+## Metrics (operators)
+
+| Method | Path | Access | Returns |
+|---|---|---|---|
+| GET | `/api/metrics` | Clients on this host only (127.0.0.1, ::1); 403 otherwise | Prometheus text format |
+
+of-api renders this endpoint directly from of-core's shared memory, through a read-only
+mapping, and never sends a request to the core. It therefore keeps answering while the
+core is busy, and reports `orderforge_core_up 0` while the core is down.
+
+It covers:
+
+- **Counters:** requests, orders, CAS retries, payments, busy rejections, expired
+  reservations, WAL appends, fsyncs and bytes, and crash recoveries.
+- **Histogram:** `orderforge_request_duration_seconds`.
+- **Per-product gauges:** `orderforge_stock_available` and `orderforge_stock_reserved`.
+
+`of-ctl metrics` prints the same text.

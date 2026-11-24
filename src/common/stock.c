@@ -89,6 +89,38 @@ int stock_create_anon(stock_table_t *t, uint32_t capacity)
     return 0;
 }
 
+int stock_reopen(stock_table_t *t, const char *name)
+{
+    memset(t, 0, sizeof *t);
+    snprintf(t->name, sizeof t->name, "%s", name);
+    int fd = shm_open(name, O_RDWR | O_CLOEXEC, 0);
+    if (fd < 0)
+        return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || (size_t)st.st_size < sizeof(stock_shm_t)) {
+        close(fd);
+        errno = EPROTO;
+        return -1;
+    }
+    int rc = map_fd(t, fd, (size_t)st.st_size, PROT_READ | PROT_WRITE);
+    close(fd);
+    if (rc != 0)
+        return -1;
+    stock_shm_t *h = t->shm;
+    if (h->magic != OF_STOCK_MAGIC || h->abi_version != OF_STOCK_ABI ||
+        table_bytes(h->capacity) > t->map_size) {
+        munmap(t->shm, t->map_size);
+        t->shm = NULL;
+        errno = EPROTO; /* written by another build: the caller recreates it */
+        return -1;
+    }
+    atomic_thread_fence(memory_order_acquire);
+    t->mask = h->capacity - 1;
+    pthread_mutex_init(&t->insert_lock, NULL);
+    t->owner = true;
+    return 0;
+}
+
 int stock_attach(stock_table_t *t, const char *name)
 {
     memset(t, 0, sizeof *t);

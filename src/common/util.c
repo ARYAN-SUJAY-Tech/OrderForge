@@ -1,11 +1,17 @@
 #include "common/util.h"
 
+#include "common/config.h"
+
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 int of_random_bytes(void *buf, size_t len)
@@ -173,4 +179,64 @@ int64_t of_now_us(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static pid_t read_pid(int fd)
+{
+    char buf[32];
+    ssize_t n = pread(fd, buf, sizeof buf - 1, 0);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+    return (pid_t)strtol(buf, NULL, 10);
+}
+
+int of_pidfile_acquire(const char *path, pid_t *holder)
+{
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        of_mkdir_p(dir, 0750);
+    }
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int e = errno;
+        if (holder)
+            *holder = read_pid(fd);
+        close(fd);
+        errno = e;
+        return -1;
+    }
+    char buf[32];
+    int n = snprintf(buf, sizeof buf, "%d\n", (int)getpid());
+    if (ftruncate(fd, 0) != 0 || pwrite(fd, buf, (size_t)n, 0) != n) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int of_pidfile_read(const char *path, pid_t *pid)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    /* If we can take a shared lock, nobody holds the exclusive one: the file is stale. */
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
+        close(fd);
+        return -1;
+    }
+    *pid = read_pid(fd);
+    close(fd);
+    return *pid > 0 ? 0 : -1;
+}
+
+void of_pidfile_path(const void *cfgp, const char *name, char *out, size_t outlen)
+{
+    const of_config_t *cfg = cfgp;
+    snprintf(out, outlen, "%s/%s.pid", of_config_get(cfg, "run.dir", "run"), name);
 }

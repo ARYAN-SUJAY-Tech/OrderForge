@@ -92,9 +92,11 @@ CREATE TABLE orders (
     status          VARCHAR(20) NOT NULL,
     total_paise     BIGINT NOT NULL,
     idempotency_key VARCHAR(100) NULL, -- "u<user id>:<client key>"
+    wal_txid        BIGINT UNSIGNED NULL, -- the WAL RESERVE this order committed (lockfree-shm)
     created_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     updated_at      DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     UNIQUE KEY uq_orders_idem (idempotency_key),
+    UNIQUE KEY uq_orders_wal_txid (wal_txid),
     KEY ix_orders_user (user_id, created_at),
     KEY ix_orders_status (status, updated_at),
     CONSTRAINT ck_orders_status CHECK (status IN ('placed', 'payment_pending', 'paid', 'packed',

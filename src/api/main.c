@@ -26,7 +26,9 @@
 #include "common/buf.h"
 #include "common/config.h"
 #include "common/log.h"
+#include "common/metrics.h"
 #include "common/proto.h"
+#include "common/stock.h"
 #include "common/util.h"
 
 #include <errno.h>
@@ -63,9 +65,10 @@ static int         nworkers;
 /* ------------------------------------------------------------------ worker: core client */
 
 typedef struct {
-    int   status;
-    char  set_cookie[OF_MAX_COOKIE + 1];
-    buf_t body;
+    int         status;
+    char        set_cookie[OF_MAX_COOKIE + 1];
+    const char *content_type; /* NULL: JSON */
+    buf_t       body;
 } api_resp_t;
 
 static int      core_fd = -1;
@@ -256,12 +259,13 @@ static void send_response(FCGX_Request *rq, const api_resp_t *resp)
     char head[512 + OF_MAX_COOKIE];
     int n = snprintf(head, sizeof head,
                      "Status: %d %s\r\n"
-                     "Content-Type: application/json; charset=utf-8\r\n"
+                     "Content-Type: %s\r\n"
                      "Cache-Control: no-store\r\n"
                      "X-Content-Type-Options: nosniff\r\n"
                      "%s%s%s"
                      "Content-Length: %zu\r\n\r\n",
                      resp->status, of_status_text(resp->status),
+                     resp->content_type ? resp->content_type : "application/json; charset=utf-8",
                      resp->set_cookie[0] ? "Set-Cookie: " : "", resp->set_cookie,
                      resp->set_cookie[0] ? "\r\n" : "", resp->body.len);
     if (n < 0 || (size_t)n >= sizeof head)
@@ -283,6 +287,32 @@ static int read_body(FCGX_Request *rq, char *buf, size_t len)
     }
     buf[len] = '\0';
     return 0;
+}
+
+/*
+ * GET /api/metrics: Prometheus text format, rendered straight from of-core's shared
+ * memory (mapped read-only per scrape), so it works even while the core is busy.
+ * Only clients on this host may scrape.
+ */
+static void serve_metrics(const char *ip, api_resp_t *resp)
+{
+    if (!ip || (strcmp(ip, "127.0.0.1") != 0 && strcmp(ip, "::1") != 0)) {
+        api_error(resp, 403, "forbidden", "metrics are only served to localhost");
+        return;
+    }
+    stock_table_t t;
+    if (stock_attach(&t, of_config_get(&cfg, "core.shm_name", "/orderforge")) != 0) {
+        resp->status = 503;
+        resp->content_type = "text/plain; version=0.0.4";
+        buf_reset(&resp->body);
+        buf_puts(&resp->body, "# of-core shared memory not available\norderforge_core_up 0\n");
+        return;
+    }
+    resp->status = 200;
+    resp->content_type = "text/plain; version=0.0.4";
+    buf_reset(&resp->body);
+    metrics_format(&t, &resp->body);
+    stock_close(&t, false);
 }
 
 static void serve_one(FCGX_Request *rq, api_resp_t *resp)
@@ -314,6 +344,7 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
 
     resp->status = 0;
     resp->set_cookie[0] = '\0';
+    resp->content_type = NULL;
     buf_reset(&resp->body);
 
     /* Validate at the edge what the protocol caps anyway, with friendlier errors. */
@@ -343,7 +374,9 @@ static void serve_one(FCGX_Request *rq, api_resp_t *resp)
     if (req.body_len == 0)
         body[0] = '\0';
 
-    if (resp->status == 0) {
+    if (resp->status == 0 && req.method == OF_GET && strcmp(path, "/api/metrics") == 0) {
+        serve_metrics(req.ip, resp);
+    } else if (resp->status == 0) {
         (void)of_cookie_get(FCGX_GetParam("HTTP_COOKIE", rq->envp), "of_session", session,
                             sizeof session);
         core_call(&req, resp);
@@ -505,6 +538,13 @@ int main(int argc, char **argv)
     }
     if (of_log_open_config(&cfg, "of-api") != 0)
         return 1;
+    char pid_path[512];
+    pid_t holder = 0;
+    of_pidfile_path(&cfg, "of-api", pid_path, sizeof pid_path);
+    if (of_pidfile_acquire(pid_path, &holder) < 0) {
+        fprintf(stderr, "of-api: already running (pid %d holds %s)\n", (int)holder, pid_path);
+        return 1;
+    }
 
     int ok, ok2;
     nworkers = (int)of_config_get_long(&cfg, "api.workers", 16, 1, MAX_WORKERS, &ok);

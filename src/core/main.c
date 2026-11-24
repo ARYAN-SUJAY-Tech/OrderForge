@@ -18,11 +18,13 @@
  *                          kernel limits an unprivileged queue to 10 messages, so the
  *                          outbox absorbs bursts and the sender blocks (with a timeout)
  *                          while the queue is full.
- *   background             its own epoll loop over the reply queue (a POSIX message queue
- *                          is a pollable descriptor on Linux), a timerfd for the
- *                          reservation-expiry reaper, and an eventfd used to stop it.
- *                          Verifies each reply's MAC and nonce, then applies it. Owns one
- *                          MySQL connection, separate from the workers'.
+ *   payment-reply workers  core.payment_workers threads, each blocked in mq_timedreceive
+ *                          on its own descriptor for the reply queue (the kernel gives a
+ *                          message to exactly one of them) and owning a MySQL connection:
+ *                          verify MAC and nonce, then apply the reply.
+ *   reaper                 its own epoll loop over a timerfd (reservation expiry) and an
+ *                          eventfd used to stop it, with its own MySQL connection, so
+ *                          nothing can starve it.
  *
  * Backpressure
  *   The queue is bounded (core.queue_size). When it is full the reactor answers 503
@@ -39,6 +41,14 @@
  *                   then exit cleanly
  *   SIGHUP          reopen the log file
  *
+ * Crash recovery (see setup_stock_and_recover)
+ *   The shared-memory stock table survives a crash (it lives in /dev/shm). On start, a
+ *   table left by a crashed core is reopened, the write-ahead log is replayed, every
+ *   reservation that was in flight is resolved against MySQL (orders.wal_txid tells
+ *   whether its transaction committed), then a reconciliation pass checks every product
+ *   against MySQL and corrects (and counts) any drift. Only then is traffic accepted.
+ *   A pid file locked with flock() guarantees a single core.
+ *
  * Security
  *   The socket is created mode 0660 and every connection's peer uid is checked with
  *   SO_PEERCRED: only our own uid (or core.allow_uid) may talk to the core.
@@ -52,6 +62,7 @@
 #include "common/queue.h"
 #include "common/stock.h"
 #include "common/util.h"
+#include "common/wal.h"
 #include "store/store.h"
 
 #include <errno.h>
@@ -112,7 +123,10 @@ static conn_t        conns[MAX_CONNS];
 static int           epfd = -1, listen_fd = -1, efd = -1, sfd = -1;
 static char          sock_path[108];
 static uid_t         allow_uid;
-static int64_t       job_timeout_us, slow_us;
+static _Atomic int64_t job_timeout_us, slow_us; /* reloadable on SIGHUP */
+static const char   *conf_path_g;
+static wal_t        *wal;
+static _Atomic uint64_t next_txid;
 static int           nworkers;
 
 /* Payments. */
@@ -228,14 +242,24 @@ static void *pay_sender_main(void *arg)
     return NULL;
 }
 
-static void handle_reply(store_t *store, pay_replay_t *replay, const pay_msg_t *m)
+/* Replay protection is shared by every reply worker. */
+static pay_replay_t    replay_guard;
+static pthread_mutex_t replay_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic bool    replies_stopping;
+static int             nreply_workers;
+static const char     *rep_queue_name;
+
+static void handle_reply(store_t *store, const pay_msg_t *m)
 {
     if (pay_verify(m, PAY_REPLY, pay_key) != 0) {
         atomic_fetch_add(&METRIC(payments_rejected), 1);
         LOG_WARN("payment_rejected", "reply with a bad MAC or format dropped");
         return;
     }
-    if (pay_replay_check(replay, m, pay_now_ms(), 300000) != 0) {
+    pthread_mutex_lock(&replay_lock);
+    int fresh = pay_replay_check(&replay_guard, m, pay_now_ms(), 300000);
+    pthread_mutex_unlock(&replay_lock);
+    if (fresh != 0) {
         atomic_fetch_add(&METRIC(payments_rejected), 1);
         LOG_WARN("payment_rejected", "replayed or stale reply for %s dropped", m->idem_key);
         return;
@@ -245,14 +269,66 @@ static void handle_reply(store_t *store, pay_replay_t *replay, const pay_msg_t *
                   db_error(store->db));
 }
 
+/*
+ * Payment-reply workers (core.payment_workers threads). Each opens its own blocking
+ * descriptor on the reply queue and its own MySQL connection; the kernel hands every
+ * message to exactly one receiver, so the replies are applied in parallel. (A single
+ * thread could not keep up with a few hundred checkouts a second: replies piled up in
+ * the 10-message queue and, worse, starved the expiry reaper sharing its loop.)
+ */
+static void *reply_worker_main(void *arg)
+{
+    long id = (long)arg;
+    store_t store;
+    char err[256];
+    if (store_init(&store, &cfg, &stock, stock_mode, err, sizeof err) != 0) {
+        LOG_ERROR("payment_worker", "%ld: %s", id, err);
+        return NULL;
+    }
+    mqd_t q = mq_open(rep_queue_name, O_RDONLY | O_CLOEXEC);
+    if (q == (mqd_t)-1) {
+        LOG_ERROR("payment_worker", "%ld: mq_open %s: %s", id, rep_queue_name, strerror(errno));
+        store_close(&store);
+        return NULL;
+    }
+    int64_t next_reconnect = 0;
+    while (!atomic_load(&replies_stopping)) {
+        /* A timed receive, so the thread notices shutdown within half a second. */
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 500 * 1000000L;
+        if (until.tv_nsec >= 1000000000L) {
+            until.tv_sec++;
+            until.tv_nsec -= 1000000000L;
+        }
+        pay_msg_t m;
+        ssize_t got = mq_timedreceive(q, (char *)&m, sizeof m, NULL, &until);
+        if (got < 0)
+            continue; /* ETIMEDOUT or EINTR */
+        if (db_broken(store.db) && of_now_us() >= next_reconnect) {
+            next_reconnect = of_now_us() + 1000000;
+            if (store_reconnect(&store, err, sizeof err) != 0)
+                LOG_WARN("db_reconnect", "payment worker %ld: %s", id, err);
+        }
+        if ((size_t)got == sizeof m)
+            handle_reply(&store, &m);
+        else
+            atomic_fetch_add(&METRIC(payments_rejected), 1);
+    }
+    mq_close(q);
+    store_close(&store);
+    return NULL;
+}
+
+/* The expiry reaper: a timerfd and a stop eventfd in its own small epoll loop, with its
+ * own MySQL connection, so nothing else can delay it. */
 static void *background_main(void *arg)
 {
     (void)arg;
     store_t store;
     char err[256];
-    static pay_replay_t replay;
     if (store_init(&store, &cfg, &stock, stock_mode, err, sizeof err) != 0) {
-        LOG_ERROR("background", "%s", err);
+        LOG_ERROR("reaper", "%s", err);
         return NULL;
     }
 
@@ -263,41 +339,30 @@ static void *background_main(void *arg)
     };
     int ep = epoll_create1(EPOLL_CLOEXEC);
     if (tfd < 0 || ep < 0 || timerfd_settime(tfd, 0, &its, NULL) != 0) {
-        LOG_ERROR("background", "timerfd/epoll: %s", strerror(errno));
+        LOG_ERROR("reaper", "timerfd/epoll: %s", strerror(errno));
         return NULL;
     }
     struct epoll_event ev = {.events = EPOLLIN};
-    ev.data.u32 = 1;
-    epoll_ctl(ep, EPOLL_CTL_ADD, (int)mq_rep, &ev);
     ev.data.u32 = 2;
     epoll_ctl(ep, EPOLL_CTL_ADD, tfd, &ev);
     ev.data.u32 = 3;
     epoll_ctl(ep, EPOLL_CTL_ADD, bg_stop_fd, &ev);
-    LOG_INFO("background", "payment replies and reaper (every %lld ms) running",
-             (long long)reaper_interval_ms);
+    LOG_INFO("reaper", "expiry reaper running every %lld ms; %d payment-reply workers",
+             (long long)reaper_interval_ms, nreply_workers);
 
     int64_t next_reconnect = 0;
     for (bool running = true; running;) {
-        struct epoll_event evs[4];
-        int n = epoll_wait(ep, evs, 4, -1);
+        struct epoll_event evs[2];
+        int n = epoll_wait(ep, evs, 2, -1);
         if (n < 0 && errno == EINTR)
             continue;
         if (db_broken(store.db) && of_now_us() >= next_reconnect) {
             next_reconnect = of_now_us() + 1000000;
             if (store_reconnect(&store, err, sizeof err) != 0)
-                LOG_WARN("db_reconnect", "background: %s", err);
+                LOG_WARN("db_reconnect", "reaper: %s", err);
         }
         for (int i = 0; i < n; i++) {
-            if (evs[i].data.u32 == 1) {
-                pay_msg_t m;
-                ssize_t got;
-                while ((got = mq_receive(mq_rep, (char *)&m, sizeof m, NULL)) >= 0) {
-                    if ((size_t)got == sizeof m)
-                        handle_reply(&store, &replay, &m);
-                    else
-                        atomic_fetch_add(&METRIC(payments_rejected), 1);
-                }
-            } else if (evs[i].data.u32 == 2) {
+            if (evs[i].data.u32 == 2) {
                 uint64_t ticks;
                 if (read(tfd, &ticks, sizeof ticks) != sizeof ticks)
                     continue;
@@ -325,16 +390,19 @@ static int setup_payments(void)
                         "  echo \"pay.hmac_key = $(openssl rand -hex 32)\" >> conf/orderforge.conf\n");
         return -1;
     }
-    int ok1, ok2, ok3;
+    int ok1, ok2, ok3, ok4;
     long maxmsg = of_config_get_long(&cfg, "pay.mq_maxmsg", 10, 1, 1000, &ok1);
     long outbox = of_config_get_long(&cfg, "pay.outbox_size", 8192, 1, 1 << 20, &ok2);
     reaper_interval_ms = of_config_get_long(&cfg, "core.reaper_interval_ms", 1000, 50, 600000, &ok3);
-    if (!ok1 || !ok2 || !ok3) {
-        LOG_ERROR("payments", "pay.mq_maxmsg, pay.outbox_size or core.reaper_interval_ms out of range");
+    nreply_workers = (int)of_config_get_long(&cfg, "core.payment_workers", 4, 1, 64, &ok4);
+    if (!ok1 || !ok2 || !ok3 || !ok4) {
+        LOG_ERROR("payments", "pay.mq_maxmsg, pay.outbox_size, core.reaper_interval_ms or "
+                              "core.payment_workers out of range");
         return -1;
     }
     const char *req_name = of_config_get(&cfg, "pay.request_queue", "/orderforge-pay-req");
     const char *rep_name = of_config_get(&cfg, "pay.reply_queue", "/orderforge-pay-rep");
+    rep_queue_name = rep_name;
 
     /* Created by whichever of of-core and of-pay starts first; both use these attributes.
      * The queues are never unlinked on shutdown, so messages survive a restart. */
@@ -364,6 +432,18 @@ static int setup_payments(void)
 
 /* ------------------------------------------------------------------ workers */
 
+/* Histogram of time from queueing to response, kept in shared memory. */
+static void record_latency(int64_t us)
+{
+    static const int bounds[OF_LAT_BUCKETS] = OF_LAT_BOUNDS_MS;
+    int b = 0;
+    while (b < OF_LAT_BUCKETS - 1 && us > (int64_t)bounds[b] * 1000)
+        b++;
+    atomic_fetch_add_explicit(&METRIC(latency_bucket[b]), 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&METRIC(latency_sum_us), (uint64_t)us, memory_order_relaxed);
+    atomic_fetch_add_explicit(&METRIC(latency_count), 1, memory_order_relaxed);
+}
+
 static void *worker_main(void *arg)
 {
     long id = (long)arg;
@@ -372,6 +452,10 @@ static void *worker_main(void *arg)
 
     int rc = store_init(&store, &cfg, &stock, stock_mode, err, sizeof err);
     store.pay_submit = pay_submit;
+    if (stock_mode == STOCK_LOCKFREE) {
+        store.wal = wal;
+        store.next_txid = &next_txid;
+    }
     pthread_mutex_lock(&init_lock);
     if (rc == 0)
         workers_ready++;
@@ -414,7 +498,8 @@ static void *worker_main(void *arg)
             of_resp_free(&resp);
         }
 
-        int64_t took = of_now_us() - start;
+        int64_t end = of_now_us(), took = end - start;
+        record_latency(end - j->enq_us);
         if (took > slow_us)
             LOG_WARN("slow_request", "trace=%llu %s took %lld ms (queued %lld ms)",
                      (unsigned long long)j->request_id, j->req.path, (long long)(took / 1000),
@@ -710,31 +795,235 @@ static int open_socket(void)
     return fd;
 }
 
-static int setup_stock(void)
+/* ------------------------------------------------------------------ recovery */
+
+typedef struct {
+    wal_rec_t *recs;
+    size_t     n, cap;
+} pending_set_t;
+
+/* Rebuild, from the log, the reservations that never got an outcome. */
+static int collect_pending(const wal_rec_t *r, void *ctx)
 {
+    pending_set_t *p = ctx;
+    if (r->type == WAL_RESERVE) {
+        if (p->n == p->cap) {
+            size_t cap = p->cap ? p->cap * 2 : 64;
+            wal_rec_t *q = realloc(p->recs, cap * sizeof *q);
+            if (!q)
+                return -1;
+            p->recs = q;
+            p->cap = cap;
+        }
+        p->recs[p->n++] = *r;
+    } else if (r->type == WAL_COMMIT || r->type == WAL_RELEASE) {
+        for (size_t i = 0; i < p->n; i++)
+            if (p->recs[i].txid == r->txid) {
+                p->recs[i] = p->recs[--p->n];
+                break;
+            }
+    }
+    return 0;
+}
+
+/*
+ * Bring the shared-memory table to a state that exactly matches MySQL, using the
+ * write-ahead log to resolve whatever was in flight when the previous core died:
+ *   1. reopen the surviving table (or create a fresh one if there is none);
+ *   2. replay the log, collecting RESERVE records with no COMMIT/RELEASE;
+ *   3. for each, look up orders.wal_txid: present => MySQL committed the order, so the
+ *      units stay sold (commit them in shared memory); absent => MySQL rolled back, so
+ *      give the units back;
+ *   4. reconcile every product against MySQL and correct any drift (a crash inside the
+ *      microseconds between the CAS and the RESERVE record, or during an admin change);
+ *   5. start a fresh, compacted log.
+ * Every step is counted in the shared-memory metrics.
+ */
+static int setup_stock_and_recover(void)
+{
+    int64_t t0 = of_now_us();
     const char *name = of_config_get(&cfg, "core.shm_name", "/orderforge");
-    int ok;
-    long cap = of_config_get_long(&cfg, "core.stock_capacity", 4096, 64, 1 << 24, &ok);
-    if (!ok || stock_create(&stock, name, (uint32_t)cap) != 0) {
-        LOG_ERROR("shm", "cannot create shared memory %s: %s", name, strerror(errno));
+    char wal_path[512];
+    snprintf(wal_path, sizeof wal_path, "%s",
+             of_config_get(&cfg, "core.wal_path", "run/of-core.wal"));
+    int ok1, ok2, ok3;
+    long cap = of_config_get_long(&cfg, "core.stock_capacity", 4096, 64, 1 << 24, &ok1);
+    long group_us = of_config_get_long(&cfg, "core.wal_group_us", 2000, 0, 1000000, &ok2);
+    long wal_max = of_config_get_long(&cfg, "core.wal_max_bytes", 16 << 20, 4096, 1L << 30, &ok3);
+    if (!ok1 || !ok2 || !ok3) {
+        LOG_ERROR("config", "core.stock_capacity, core.wal_group_us or core.wal_max_bytes out of range");
         return -1;
     }
+
+    /* 1. The table: a survivor means the previous core crashed (a clean stop unlinks it). */
+    bool survived = stock_reopen(&stock, name) == 0;
+    if (!survived) {
+        if (errno == EPROTO)
+            LOG_WARN("shm", "%s was written by an incompatible build; recreating it", name);
+        if (stock_create(&stock, name, (uint32_t)cap) != 0) {
+            LOG_ERROR("shm", "cannot create shared memory %s: %s", name, strerror(errno));
+            return -1;
+        }
+    }
+    atomic_store(&stock.shm->started_unix, 0); /* "not ready" while we recover */
+    atomic_fetch_add(&METRIC(starts), 1);
 
     char err[256];
     db_t *db = db_connect(&cfg, err, sizeof err);
     if (!db) {
-        LOG_ERROR("shm", "loading stock: %s", err);
+        LOG_ERROR("recovery", "MySQL: %s", err);
         return -1;
     }
-    int n = store_load_stock(db, &stock, err, sizeof err);
+
+    /* 2. Replay the log. */
+    pending_set_t pending = {0};
+    wal_scan_t scan;
+    if (wal_replay(wal_path, collect_pending, &pending, &scan) != 0) {
+        LOG_ERROR("recovery", "reading %s: %s", wal_path, strerror(errno));
+        db_close(db);
+        return -1;
+    }
+    atomic_fetch_add(&METRIC(wal_torn_bytes), scan.torn_bytes);
+
+    /* 3. Resolve each in-flight reservation against MySQL. */
+    uint64_t committed = 0, released = 0;
+    for (size_t i = 0; i < pending.n; i++) {
+        const wal_rec_t *r = &pending.recs[i];
+        int64_t order_id = 0;
+        int rc = db_query_int(db, &order_id, "SELECT id FROM orders WHERE wal_txid = ?", "i",
+                              (int64_t)r->txid);
+        if (rc < 0) {
+            LOG_ERROR("recovery", "looking up txid %llu: %s", (unsigned long long)r->txid,
+                      db_error(db));
+            free(pending.recs);
+            db_close(db);
+            return -1;
+        }
+        if (rc == 1)
+            committed++;
+        else
+            released++;
+        if (survived) {
+            if (rc == 1)
+                stock_commit_all(&stock, r->lines, r->nlines);
+            else
+                stock_release_all(&stock, r->lines, r->nlines);
+        }
+        LOG_INFO("recovery", "txid %llu (%u lines): %s", (unsigned long long)r->txid, r->nlines,
+                 rc == 1 ? "MySQL committed order, units stay sold"
+                         : "MySQL rolled back, units returned");
+    }
+    free(pending.recs);
+    atomic_fetch_add(&METRIC(recovered_committed), committed);
+    atomic_fetch_add(&METRIC(recovered_released), released);
+
+    /* 4. Reconcile every product with MySQL (and load products the table lacks). */
+    uint64_t drift_products = 0, drift_units = 0;
+    int products = 0;
+    db_res_t r;
+    if (db_query(db, &r,
+                 "SELECT p.id, i.stock_on_hand, p.price_paise FROM products p "
+                 "JOIN inventory i ON i.product_id = p.id ORDER BY p.id",
+                 "") != 0) {
+        LOG_ERROR("recovery", "loading stock: %s", db_error(db));
+        db_close(db);
+        return -1;
+    }
+    while (db_fetch(&r) == 1) {
+        uint64_t id = (uint64_t)db_int(&r, 0);
+        int32_t on_hand = (int32_t)db_int(&r, 1);
+        stock_slot_t *slot = stock_find(&stock, id);
+        /* Only a surviving lockfree-shm table is expected to match already; anything
+         * else is simply (re)loaded from MySQL. */
+        if (survived && stock_mode == STOCK_LOCKFREE) {
+            int32_t av = slot ? atomic_load(&slot->available) : 0;
+            int32_t rs = slot ? atomic_load(&slot->reserved) : 0;
+            if (!slot || av != on_hand || rs != 0) {
+                drift_products++;
+                drift_units += (uint64_t)llabs((long long)av - on_hand) + (uint64_t)llabs(rs);
+                LOG_WARN("reconcile", "product %llu: shared memory available %d reserved %d, "
+                                      "MySQL %d; corrected",
+                         (unsigned long long)id, av, rs, on_hand);
+            }
+        }
+        if (!stock_upsert(&stock, id, on_hand, db_int(&r, 2))) {
+            LOG_ERROR("shm", "stock table full (raise core.stock_capacity)");
+            db_res_free(&r);
+            db_close(db);
+            return -1;
+        }
+        products++;
+    }
+    db_res_free(&r);
+    atomic_fetch_add(&METRIC(drift_products), drift_products);
+    atomic_fetch_add(&METRIC(drift_units), drift_units);
+
+    /* 5. Transaction ids continue above anything the log or MySQL has seen. */
+    int64_t max_db_txid = 0;
+    if (db_query_int(db, &max_db_txid, "SELECT COALESCE(MAX(wal_txid), 0) FROM orders", "") < 0) {
+        db_close(db);
+        return -1;
+    }
     db_close(db);
-    if (n < 0) {
-        LOG_ERROR("shm", "%s", err);
+    uint64_t start_txid = (uint64_t)max_db_txid > scan.max_txid ? (uint64_t)max_db_txid
+                                                                : scan.max_txid;
+    atomic_store(&next_txid, start_txid + 1);
+
+    char dir[512];
+    snprintf(dir, sizeof dir, "%s", wal_path);
+    if (of_mkdir_p(dirname(dir), 0750) != 0) {
+        LOG_ERROR("wal", "mkdir for %s: %s", wal_path, strerror(errno));
         return -1;
     }
-    LOG_INFO("shm", "stock table %s: %d products, capacity %u, %zu bytes", name, n,
-             stock.shm->capacity, stock.map_size);
+    wal = wal_start(wal_path, scan.last_seq, start_txid + 1, group_us, (size_t)wal_max,
+                    &METRIC(wal), err, sizeof err);
+    if (!wal) {
+        LOG_ERROR("wal", "%s", err);
+        return -1;
+    }
+
+    int64_t ms = (of_now_us() - t0) / 1000;
+    atomic_store(&METRIC(recovery_ms_last), (uint64_t)ms);
+    if (survived)
+        atomic_fetch_add(&METRIC(recoveries), 1);
+    LOG_INFO("recovery", "%s: %d products; log %llu records (%llu torn bytes cut); in flight "
+                         "%llu committed, %llu released; drift %llu products / %llu units; %lld ms",
+             survived ? "recovered from a crash" : "clean start", products,
+             (unsigned long long)scan.records, (unsigned long long)scan.torn_bytes,
+             (unsigned long long)committed, (unsigned long long)released,
+             (unsigned long long)drift_products, (unsigned long long)drift_units, (long long)ms);
+    if (survived)
+        fprintf(stderr, "of-core: recovered in %lld ms: %llu in-flight committed, %llu released, "
+                        "drift %llu products\n",
+                (long long)ms, (unsigned long long)committed, (unsigned long long)released,
+                (unsigned long long)drift_products);
     return 0;
+}
+
+/* SIGHUP: reopen the log and re-read the settings that are safe to change live. */
+static void reload_config(void)
+{
+    of_log_reopen();
+    of_config_t fresh;
+    char err[256];
+    if (of_config_load(&fresh, conf_path_g, err, sizeof err) != 0) {
+        LOG_WARN("reload", "config not reloaded: %s", err);
+        return;
+    }
+    int ok1, ok2;
+    long jt = of_config_get_long(&fresh, "core.job_timeout_ms", 10000, 1, 600000, &ok1);
+    long sl = of_config_get_long(&fresh, "core.slow_ms", 500, 1, 600000, &ok2);
+    int lvl = of_log_level_parse(of_config_get(&fresh, "log.level", "info"));
+    if (!ok1 || !ok2 || lvl < 0) {
+        LOG_WARN("reload", "config not reloaded: a value is out of range");
+        return;
+    }
+    atomic_store(&job_timeout_us, (int64_t)jt * 1000);
+    atomic_store(&slow_us, (int64_t)sl * 1000);
+    of_log_set_level((of_log_level_t)lvl);
+    LOG_INFO("reload", "SIGHUP: log reopened; log.level=%s core.job_timeout_ms=%ld "
+                       "core.slow_ms=%ld (other settings need a restart)",
+             of_config_get(&fresh, "log.level", "info"), jt, sl);
 }
 
 static void usage(void)
@@ -745,6 +1034,18 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
+    /* Block the handled signals FIRST, before any thread exists: every thread inherits
+     * the mask, so a process-directed SIGTERM can only be taken through the reactor's
+     * signalfd. (A thread created earlier with SIGTERM unblocked - the WAL flusher, say -
+     * would take the default action for the whole process and kill it mid-drain.) */
+    sigset_t sigs;
+    sigemptyset(&sigs);
+    sigaddset(&sigs, SIGTERM);
+    sigaddset(&sigs, SIGINT);
+    sigaddset(&sigs, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &sigs, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
     const char *conf_path = "conf/orderforge.conf";
     const char *mode_arg = NULL;
     int opt;
@@ -758,12 +1059,25 @@ int main(int argc, char **argv)
     }
 
     char err[256];
+    conf_path_g = conf_path;
     if (of_config_load(&cfg, conf_path, err, sizeof err) != 0) {
         fprintf(stderr, "of-core: %s\n", err);
         return 1;
     }
     if (of_log_open_config(&cfg, "of-core") != 0)
         return 1;
+
+    /* One core per pid file. The kernel drops the flock when we die, even on kill -9. */
+    char pid_path[512];
+    of_pidfile_path(&cfg, "of-core", pid_path, sizeof pid_path);
+    char run_dir[512];
+    snprintf(run_dir, sizeof run_dir, "%s", pid_path);
+    of_mkdir_p(dirname(run_dir), 0750);
+    pid_t holder = 0;
+    if (of_pidfile_acquire(pid_path, &holder) < 0) {
+        fprintf(stderr, "of-core: already running (pid %d holds %s)\n", (int)holder, pid_path);
+        return 1;
+    }
 
     stock_mode = stock_mode_parse(mode_arg ? mode_arg
                                            : of_config_get(&cfg, "store.stock_mode",
@@ -792,21 +1106,11 @@ int main(int argc, char **argv)
      * otherwise reset) its shared-memory table. */
     if ((listen_fd = open_socket()) < 0)
         return 1;
-    if (setup_stock() != 0 || queue_init(&jobs, (size_t)qsize) != 0) {
+    if (setup_stock_and_recover() != 0 || queue_init(&jobs, (size_t)qsize) != 0) {
         unlink(sock_path);
         return 1;
     }
     stock.shm->stock_mode = (uint32_t)stock_mode;
-
-    /* Block the signals for every thread (workers inherit the mask), then receive them
-     * as data through a signalfd in the reactor. */
-    sigset_t sigs;
-    sigemptyset(&sigs);
-    sigaddset(&sigs, SIGTERM);
-    sigaddset(&sigs, SIGINT);
-    sigaddset(&sigs, SIGHUP);
-    pthread_sigmask(SIG_BLOCK, &sigs, NULL);
-    signal(SIGPIPE, SIG_IGN);
 
     sfd = signalfd(-1, &sigs, SFD_NONBLOCK | SFD_CLOEXEC);
     efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -842,11 +1146,17 @@ int main(int argc, char **argv)
     }
 
     pthread_t sender_thread, bg_thread;
+    pthread_t *reply_threads = calloc((size_t)nreply_workers, sizeof *reply_threads);
     if (pthread_create(&sender_thread, NULL, pay_sender_main, NULL) != 0 ||
         pthread_create(&bg_thread, NULL, background_main, NULL) != 0) {
         LOG_ERROR("init", "cannot start the payment threads");
         return 1;
     }
+    for (long i = 0; i < nreply_workers; i++)
+        if (pthread_create(&reply_threads[i], NULL, reply_worker_main, (void *)i) != 0) {
+            LOG_ERROR("init", "cannot start payment-reply worker %ld", i);
+            return 1;
+        }
 
     atomic_store(&stock.shm->started_unix, (int64_t)time(NULL));
     LOG_INFO("start", "of-core pid %d on %s: %d workers, queue %ld, stock mode %s",
@@ -881,8 +1191,7 @@ int main(int argc, char **argv)
                 struct signalfd_siginfo si;
                 while (read(sfd, &si, sizeof si) == sizeof si) {
                     if (si.ssi_signo == SIGHUP) {
-                        of_log_reopen();
-                        LOG_INFO("reload", "log reopened");
+                        reload_config();
                     } else if (!draining) {
                         draining = true;
                         drain_deadline = of_now_us() + DRAIN_LIMIT_US;
@@ -922,10 +1231,15 @@ int main(int argc, char **argv)
     if (write(bg_stop_fd, &one, sizeof one) != sizeof one)
         LOG_WARN("shutdown", "could not signal the background thread");
     pthread_join(bg_thread, NULL);
+    atomic_store(&replies_stopping, true); /* each worker notices within 0.5 s */
+    for (int i = 0; i < nreply_workers; i++)
+        pthread_join(reply_threads[i], NULL);
+    free(reply_threads);
     mq_close(mq_req);
     mq_close(mq_rep);
     queue_destroy(&pay_outbox);
-    stock_close(&stock, true);
+    wal_stop(wal); /* every COMMIT/RELEASE flushed: the log has nothing in flight */
+    stock_close(&stock, true); /* a clean stop removes the table; a crash leaves it */
     LOG_INFO("shutdown", "of-core stopped");
     return 0;
 }

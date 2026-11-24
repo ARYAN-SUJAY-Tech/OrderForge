@@ -15,6 +15,7 @@
 #include "common/config.h"
 #include "common/proto.h" /* of_req_t, of_method_t */
 #include "common/stock.h"
+#include "common/wal.h"
 #include "store/db.h"
 
 #include <stdbool.h>
@@ -63,6 +64,8 @@ typedef struct {
     void          *pay_ctx;
     int64_t        reservation_ttl_s; /* unpaid orders are cancelled after this */
     stock_table_t *stock;        /* shared-memory table (of-core); NULL disables lockfree */
+    wal_t         *wal;          /* write-ahead log for shm reservations (lockfree mode) */
+    _Atomic uint64_t *next_txid; /* shared WAL transaction counter (of-core) */
     stock_mode_t   stock_mode;
     int64_t        naive_delay_us; /* widen the naive race window for demos; 0 in normal use */
     int64_t        session_ttl_s;
@@ -92,6 +95,19 @@ int  store_load_stock(db_t *db, stock_table_t *t, char *err, size_t errlen);
  * *oversold receives the total units sold beyond what existed.
  */
 int  store_check_invariants(db_t *db, const stock_table_t *t, buf_t *out, int64_t *oversold);
+
+/*
+ * Order-level invariants (the plan's list beyond the stock ledger):
+ *   - no unpaid order is past its reservation deadline by more than grace_s (the reaper
+ *     must have cancelled it), and none is left with no active reservation at all;
+ *   - every paid / packed / shipped / delivered order has exactly one successful payment;
+ *   - every order has a 'placed' event and its last event matches its status;
+ *   - reservation states agree with order states (active <-> unpaid, committed <-> paid
+ *     or later, released <-> cancelled/refunded);
+ *   - no refunded order still has a successful (un-refunded) payment.
+ * Writes one line per check to out. Returns the number of failing checks, or -1.
+ */
+int  store_check_orders(db_t *db, buf_t *out, int64_t grace_s);
 
 /*
  * Apply a verified reply from of-pay (runs on of-core's background thread).

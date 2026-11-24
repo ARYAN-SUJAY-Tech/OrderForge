@@ -1,11 +1,11 @@
 # OrderForge build
 #
-#   make                 debug build of everything that can be built
+#   make                 debug build of the daemons, tools and spikes
 #   make MODE=release    optimised, hardened build
 #   make MODE=asan       AddressSanitizer build   (also: tsan, ubsan)
 #   make test            build and run the unit tests
 #   make spikes          build the phase-0 spikes
-#   make deps            report which optional libraries were found
+#   make deps            report which libraries were found
 #   make clean
 
 MODE  ?= debug
@@ -42,21 +42,41 @@ CFLAGS   += $(CSTD) $(WARN) $(HARDEN) $(OPT) -Isrc -MMD -MP
 LDFLAGS  += $(LDHARD) $(SANFLAGS)
 LDLIBS   += -pthread
 
-# ---------------------------------------------------------------- optional libraries
+# ---------------------------------------------------------------- libraries
+# Found with pkg-config; `sudo ./scripts/install-deps.sh` installs them.
 HAVE_MYSQL  := $(shell pkg-config --exists mysqlclient 2>/dev/null && echo 1)
 HAVE_SODIUM := $(shell pkg-config --exists libsodium 2>/dev/null && echo 1)
-HAVE_FCGI   := $(shell test -f /usr/include/fcgiapp.h && echo 1)
+HAVE_FCGI   := $(shell (pkg-config --exists fcgi 2>/dev/null || test -f /usr/include/fcgiapp.h) && echo 1)
+HAVE_ALL    := $(and $(HAVE_MYSQL),$(HAVE_SODIUM),$(HAVE_FCGI))
 
 MYSQL_CFLAGS  := $(if $(HAVE_MYSQL),$(shell pkg-config --cflags mysqlclient))
 MYSQL_LIBS    := $(if $(HAVE_MYSQL),$(shell pkg-config --libs mysqlclient))
 SODIUM_CFLAGS := $(if $(HAVE_SODIUM),$(shell pkg-config --cflags libsodium))
 SODIUM_LIBS   := $(if $(HAVE_SODIUM),$(shell pkg-config --libs libsodium))
-FCGI_LIBS     := -lfcgi
+FCGI_CFLAGS   := $(shell pkg-config --cflags fcgi 2>/dev/null)
+FCGI_LIBS     := $(or $(shell pkg-config --libs fcgi 2>/dev/null),-lfcgi)
 
 # ---------------------------------------------------------------- common library
 COMMON_SRC := $(wildcard src/common/*.c)
 COMMON_OBJ := $(COMMON_SRC:%.c=$(BUILD)/%.o)
 LIBCOMMON  := $(BUILD)/libofcommon.a
+
+# ---------------------------------------------------------------- store library (business logic)
+STORE_SRC  := $(wildcard src/store/*.c)
+STORE_OBJ  := $(STORE_SRC:%.c=$(BUILD)/%.o)
+LIBSTORE   := $(BUILD)/libofstore.a
+STORE_LIBS := $(LIBSTORE) $(LIBCOMMON) $(MYSQL_LIBS) $(SODIUM_LIBS)
+$(STORE_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+
+# ---------------------------------------------------------------- daemons and tools
+API_SRC := $(wildcard src/api/*.c)
+API_OBJ := $(API_SRC:%.c=$(BUILD)/%.o)
+CTL_SRC := $(wildcard src/ctl/*.c)
+CTL_OBJ := $(CTL_SRC:%.c=$(BUILD)/%.o)
+$(API_OBJ): CFLAGS += $(FCGI_CFLAGS) $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+$(CTL_OBJ): CFLAGS += $(MYSQL_CFLAGS) $(SODIUM_CFLAGS)
+
+BINS := $(BUILD)/of-api $(BUILD)/of-ctl
 
 # ---------------------------------------------------------------- tests
 TEST_SRC := $(wildcard tests/unit/test_*.c)
@@ -71,8 +91,17 @@ ifeq ($(HAVE_FCGI),1)
   SPIKES += $(BUILD)/spikes/fcgi_hello
 endif
 
-.PHONY: all test spikes deps clean
-all: $(LIBCOMMON) spikes
+.PHONY: all bins test spikes deps clean check-deps
+all: check-deps bins spikes
+
+check-deps:
+ifneq ($(HAVE_ALL),1)
+	@echo "error: missing libraries (mysqlclient: $(or $(HAVE_MYSQL),no), libsodium: $(or $(HAVE_SODIUM),no), fcgi: $(or $(HAVE_FCGI),no))" >&2
+	@echo "       run: sudo ./scripts/install-deps.sh" >&2
+	@false
+endif
+
+bins: $(BINS)
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -82,7 +111,17 @@ $(LIBCOMMON): $(COMMON_OBJ)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
 
-# --- tests
+$(LIBSTORE): $(STORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+$(BUILD)/of-api: $(API_OBJ) $(LIBSTORE) $(LIBCOMMON)
+	$(CC) $(API_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(FCGI_LIBS) $(LDLIBS)
+
+$(BUILD)/of-ctl: $(CTL_OBJ) $(LIBSTORE) $(LIBCOMMON)
+	$(CC) $(CTL_OBJ) -o $@ $(LDFLAGS) $(STORE_LIBS) $(LDLIBS)
+
+# --- unit tests (no database needed)
 $(BUILD)/tests/%: tests/unit/%.c $(LIBCOMMON)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LIBCOMMON) $(LDLIBS)
@@ -113,7 +152,7 @@ $(BUILD)/spikes/mysql_stmt: spikes/mysql_stmt.c $(LIBCOMMON)
 
 $(BUILD)/spikes/fcgi_hello: spikes/fcgi_hello.c $(LIBCOMMON)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LIBCOMMON) $(FCGI_LIBS) $(LDLIBS)
+	$(CC) $(CFLAGS) $(FCGI_CFLAGS) $< -o $@ $(LDFLAGS) $(LIBCOMMON) $(FCGI_LIBS) $(LDLIBS)
 
 deps:
 	@echo "mysqlclient : $(if $(HAVE_MYSQL),found,MISSING)"
@@ -124,4 +163,4 @@ deps:
 clean:
 	rm -rf build
 
--include $(COMMON_OBJ:.o=.d)
+-include $(COMMON_OBJ:.o=.d) $(STORE_OBJ:.o=.d) $(API_OBJ:.o=.d) $(CTL_OBJ:.o=.d)

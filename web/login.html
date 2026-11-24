@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderForge – Log in</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header id="site-header"></header>
+  <main>
+    <div class="auth">
+      <section class="card">
+        <h1>Log in</h1>
+        <form id="login-form">
+          <label>Email <input type="email" name="email" required autocomplete="username" maxlength="254"></label>
+          <label>Password <input type="password" name="password" required autocomplete="current-password" maxlength="128"></label>
+          <p class="error" id="login-error"></p>
+          <button class="btn" type="submit">Log in</button>
+        </form>
+      </section>
+      <section class="card">
+        <h1>Create an account</h1>
+        <form id="register-form">
+          <label>Name <input type="text" name="name" required autocomplete="name" maxlength="100"></label>
+          <label>Email <input type="email" name="email" required autocomplete="email" maxlength="254"></label>
+          <label>Password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password"></label>
+          <p class="error" id="register-error"></p>
+          <button class="btn" type="submit">Create account</button>
+        </form>
+      </section>
+    </div>
+  </main>
+  <script src="/assets/app.js"></script>
+  <script src="/assets/login.js"></script>
+</body>
+</html>

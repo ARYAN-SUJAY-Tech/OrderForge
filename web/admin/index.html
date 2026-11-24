@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OrderForge – Admin · Products</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header id="site-header"></header>
+  <main>
+    <h1>Admin · Products</h1>
+    <p><a href="/admin/orders.html">Go to the order board &rarr;</a></p>
+
+    <section class="card">
+      <h2 id="editor-title">Add a product</h2>
+      <form id="editor" class="form-grid two">
+        <label>SKU <input name="sku" required maxlength="32" pattern="[A-Z0-9\-]+" placeholder="ELE-010"></label>
+        <label>Name <input name="name" required maxlength="120"></label>
+        <label>Price (₹) <input name="price" type="number" required min="0" step="0.01"></label>
+        <label>Category <select name="category_id" required></select></label>
+        <label id="stock-field">Opening stock <input name="stock" type="number" min="0" value="0"></label>
+        <label>Reorder level <input name="reorder_level" type="number" min="0" value="10"></label>
+        <label class="full">Description <textarea name="description" rows="3" maxlength="2000"></textarea></label>
+        <p class="error full" id="editor-error"></p>
+        <div class="actions full">
+          <button class="btn" type="submit" id="editor-submit">Add product</button>
+          <button class="btn btn-ghost" type="button" id="editor-cancel" hidden>Cancel edit</button>
+        </div>
+      </form>
+    </section>
+
+    <h2>Catalogue</h2>
+    <div class="toolbar">
+      <label class="muted"><span><input type="checkbox" id="low-only"> Show only low-stock products</span></label>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th><th>SKU</th><th>Name</th><th>Category</th><th class="num">Price</th>
+            <th class="num">Stock</th><th>Adjust stock</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </main>
+  <script src="/assets/app.js"></script>
+  <script src="/assets/admin-products.js"></script>
+</body>
+</html>

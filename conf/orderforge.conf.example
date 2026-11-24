@@ -10,6 +10,22 @@ db.password = CHANGE_ME
 db.name     = orderforge
 # Leave db.socket unset to use the client default (/var/run/mysqld/mysqld.sock).
 
-# ---- logging
+# ---- logging: one JSON-lines file per process in log.dir ("-" logs to stderr)
 log.dir   = run/log
 log.level = info
+
+# ---- of-api (FastCGI workers behind Apache)
+api.listen  = 127.0.0.1:9000
+api.workers = 4
+
+# ---- store
+# Phase 1 has only the naive stock mode (the benchmark baseline, which can oversell).
+store.stock_mode = naive
+# Extra delay inside the naive read-modify-write, in microseconds. Widens the race
+# window for demonstrations; keep 0 for normal use.
+store.naive_delay_us = 0
+
+# ---- authentication
+auth.session_ttl   = 86400
+# Set to 1 once Apache serves the site over HTTPS (adds the Secure cookie flag).
+auth.cookie_secure = 0

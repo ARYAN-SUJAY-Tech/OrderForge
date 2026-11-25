@@ -1,7 +1,20 @@
-# OrderForge design (draft, updated each phase)
+# OrderForge design
 
-This document grows from the project plan into a description of what was actually
-built. Sections marked *planned* describe later phases.
+This document describes OrderForge as it was built. It grew from the project plan
+phase by phase:
+
+- Sections 1–10 describe the system.
+- Section 11 gives the results measured at each gate.
+- Section 12 covers testing.
+- Sections 13–15 list where the build differs from the plan, the lessons learned and
+  future work.
+
+Companion documents:
+- [installation guide](install.md);
+- [user manual](user-manual.md);
+- [API reference](api.md);
+- [security review](security-review.md);
+- [benchmark report](benchmark-report.md).
 
 ## 1. Goal
 
@@ -10,7 +23,7 @@ stock is never oversold under concurrent checkout. The project is built around
 operating-system concepts: processes, threads, IPC, shared memory, synchronisation,
 signals and crash recovery.
 
-## 2. Architecture (as built, phase 4)
+## 2. Architecture
 
 ```
                  of-supervisor ── fork/exec, own process group each, restart with backoff,
@@ -42,7 +55,7 @@ Browser ─HTTP─▶ Apache httpd ─FastCGI (TCP 127.0.0.1:9000)─▶ of-api 
 
 | Process | Role | Talks to |
 |---|---|---|
-| of-api | Turns each FastCGI request into one frame. Has no business logic and no database access, and does not link libmysqlclient or libsodium | Apache (FastCGI), of-core (Unix socket) |
+| of-api | Edge checks first: rate limits (token buckets in shared memory, shared by all workers), `Origin`, JSON-only bodies, size caps. Then it turns each FastCGI request into one frame. Has no business logic and no database access, and does not link libmysqlclient or libsodium | Apache (FastCGI), of-core (Unix socket), the rate-limit table in shared memory |
 | of-core | The engine: every request is authenticated, authorised and executed here. It also sends payments, applies gateway replies and expires unpaid reservations | of-api, MySQL, shared memory, both payment queues |
 | of-pay | Mock payment gateway. Has no database; links only libsodium for the HMAC | Payment queues |
 | of-report | Periodic sales aggregation and atomic CSV reports | MySQL; shared memory (read-only, for live low-stock figures) |
@@ -600,7 +613,7 @@ Phase 4 adds:
 - **Read-only tools:** `of-ctl` reads metrics and status through a read-only mapping
   and the status file, and changes nothing except by sending signals.
 
-## 11. Results so far
+## 11. Results at each gate
 
 ### Gate 1 (phase 1)
 
@@ -741,7 +754,7 @@ raw CSVs and charts in [benchmarks/](benchmarks/). The results that change this 
   WAL flush makes it about 15% slower than db-lock.
 - **A hot product is limited by its InnoDB row lock** in every mode, because the
   durable stock write still serialises on one row. Taking that lock last ("lock late",
-  §6) gave 1.5–1.9× on one hot SKU.
+  §7) gave 1.5–1.9× on one hot SKU.
 - **Recovery after `kill -9` takes about 0.9 s** end to end, of which WAL replay is
   under 80 ms.
 - **Overload is shed with 503 "busy"** at up to 15,000 requests/s, with of-core's
@@ -764,3 +777,66 @@ raw CSVs and charts in [benchmarks/](benchmarks/). The results that change this 
 | Everything per build mode | `tests/run-all.sh asan\|ubsan\|tsan` | Phase 5 table above |
 | Memory (Valgrind) | `make valgrind` | Unit tests under memcheck |
 | Benchmarks | `scripts/bench-experiments.sh --yes`: the five headline experiments, CSVs and charts | [benchmark report](benchmark-report.md) |
+
+## 13. Plan versus what was built
+
+Every Tier 1 (core) and Tier 2 (systems depth) feature in the plan was built. No Tier 3
+(stretch) feature was; they are listed under future work. Where the build departs from
+the plan, it is for a reason found while building:
+
+| Plan | As built | Why |
+|---|---|---|
+| Stock on hand is reduced when the payment succeeds | Reduced at checkout; the reservation row carries the deadline, and every cancel, expiry or refund gives the stock back (§7) | MySQL always holds the true sellable count, so the ledger and shared-memory invariants hold at every moment, not only at rest |
+| Recovery re-applies a RESERVE with no COMMIT if its TTL has not expired | Each unresolved RESERVE is looked up in MySQL by its transaction id (`orders.wal_txid`): kept if the order committed, released if not (§8) | MySQL is the source of truth. Asking it removes any guess about whether the crash came before or after the commit |
+| WAL checkpoints | Compaction: after recovery, and when the log grows past `core.wal_max_bytes`, the open reservations are rewritten to a fresh file, which is renamed into place | Same effect, and the log never needs scanning from a checkpoint marker |
+| The WAL applies to the stock path | Only lockfree-shm mode writes the WAL | The other two modes keep no state outside MySQL, so there is nothing to recover |
+| of-api checks the session, CSRF token and input | of-api does the edge checks (rate limits, Origin, content type, size caps). Sessions, CSRF and authorisation are in of-core | of-api has no database access by design; the session table lives in MySQL behind the core |
+| Apache reuses FastCGI connections | One FastCGI connection per request (§3) | Reuse pinned every libfcgi worker on an idle connection and deadlocked the API |
+| One background thread for payment replies and the reaper | `core.payment_workers` reply threads plus a reaper thread of its own (§8) | One thread could not keep up at ~230 checkouts/s, and the reaper starved |
+| Rate limiting only | Also a JSON-only body rule and an Origin check (§10) | The security review found login CSRF through `text/plain` forms (finding F1) |
+| Inventory updated within the checkout transaction | Updated as the last statement before COMMIT ("lock late", §7) | The row lock is held until COMMIT, so on a hot product every statement after it added to every other buyer's wait (1.5–1.9× faster) |
+
+## 14. Lessons learned
+
+1. **Measure before believing a design.** The lock-free path was expected to help most
+   on a hot product. The benchmark showed that the hot product's limit is the InnoDB
+   row lock that every successful order still takes. Lock-free admission helps when
+   buyers *lose*: a sell-out halves the median wait. It costs about 15% when every
+   order succeeds, because of the extra WAL flush.
+2. **Kernel details decide correctness.**
+   - A process-directed signal can go to any thread that has not blocked it, so
+     signals must be blocked before the first thread exists (§8).
+   - The kernel drops a `flock()` even on `kill -9`, which is why a pid-file lock is
+     reliable and a pid number is not.
+3. **Every queue needs a consumer that cannot starve.** One thread serving payment
+   replies and the reaper left 344 orders past their deadline under load. Separate
+   threads fixed it.
+4. **Failure tests find what unit tests cannot.**
+   - Injecting a MySQL outage found a payment reply lost on a dead connection (F3).
+   - Running that test under ThreadSanitizer, whose slow start overlapped the outage,
+     found background threads that gave up for good (F7).
+5. **Cheap observability pays for itself.** Shared-memory counters read by `of-ctl`
+   and `/api/metrics` explained the deadlock, the starvation and the recovery timings
+   without a debugger. `/proc/<pid>/wchan` found the FastCGI deadlock.
+6. **Defence in depth is worth its cost.** Four layers guard against overselling. In
+   every crash test, the layers behind shared memory (the guarded UPDATE, the CHECK
+   constraint and the invariant checker) agreed with it.
+
+## 15. Future work
+
+- **The plan's Tier 3:**
+  - signed order receipts (Dilithium through liboqs);
+  - a seccomp-bpf sandbox for of-pay;
+  - systemd units with cgroup v2 limits;
+  - server-sent events instead of polling;
+  - TLS in Apache;
+  - fuzzing the frame parser with AFL++ or libFuzzer. The parser already rejects
+    every truncation in the unit tests; fuzzing would cover random inputs as well.
+- **Hot products:** batch the durable stock writes for one product (for example, a
+  per-product sales counter flushed periodically, with the WAL as the durable record)
+  so its buyers do not commit one at a time.
+- **HTTP keep-alive and FastCGI connection pooling** once the libfcgi accept-loop issue
+  is worked around, to cut per-request connection cost.
+- **Multiple machines:** the shared-memory table limits of-core to one host. Scaling
+  out would need the stock partitioned by product across cores.
+

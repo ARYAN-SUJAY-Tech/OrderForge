@@ -1,7 +1,22 @@
-# User manual (draft)
+# User manual
 
-The site runs at <http://localhost:8080/> once it is installed (see `install.md`).
-Screenshots will be added in phase 7.
+The site runs at <http://localhost:8080/> once it is installed (see
+[install.md](install.md)). The demo data includes these accounts:
+
+| Account | Password | Role |
+|---|---|---|
+| `alice@example.com` | `customer123` | customer |
+| `bob@example.com` | `customer123` | customer |
+| `admin@orderforge.local` | `admin12345` | administrator |
+
+These passwords are public. Before anyone else uses the site, create your own admin
+account (the password is read from standard input):
+
+```sh
+echo 'a-long-new-password' | ./build/debug/of-ctl useradd --admin you@example.com "Your Name"
+```
+
+The screenshots were taken from a demo database by `scripts/take-screenshots.py`.
 
 ## Customers
 
@@ -14,6 +29,8 @@ Choose **Log in** at the top right.
 - **Existing customers:** use the **Log in** form. After five wrong passwords in a
   row, the account is locked for a short time.
 
+![Log in and create-account forms](screenshots/01-login.png)
+
 ### Find products
 
 The **Shop** page lists every product, 12 per page.
@@ -23,6 +40,10 @@ The **Shop** page lists every product, 12 per page.
 - Each card shows the price and stock status: *In stock*, *Only N left* or
   *Out of stock*.
 - Open a product to read its description and choose a quantity.
+
+![The shop page](screenshots/02-shop.png)
+
+![A product page](screenshots/03-product.png)
 
 ### Cart
 
@@ -36,6 +57,8 @@ On the cart page you can:
 - see the running total.
 
 Prices always come from the store, so they cannot be changed in the browser.
+
+![The cart, with the test-card choice](screenshots/04-cart.png)
 
 ### Place an order and pay
 
@@ -61,11 +84,17 @@ No real card details are asked for or stored.
     and the items go back on sale.
 - **Clicking twice, or retrying after a network error,** never creates a second order.
 
+![An order waiting for the payment gateway](screenshots/05-order-waiting.png)
+
 ### Track orders
 
 **Orders** lists every order you have placed. Open one to see its items, total,
 payment status and a **Tracking** timeline of every status change. The page refreshes
 itself every 2 seconds until the order is finished.
+
+![The orders list](screenshots/07-my-orders.png)
+
+![A delivered order with its full tracking timeline](screenshots/06-order-delivered.png)
 
 ### Cancel an order
 
@@ -96,6 +125,10 @@ Log in with an admin account. An **Admin** link appears in the header.
 
 Every change is recorded in the audit log and the stock ledger.
 
+![Adding a product](screenshots/08-admin-add-product.png)
+
+![The catalogue, with stock adjustment and edit/delete on every row](screenshots/09-admin-catalogue.png)
+
 The admin pages have three tabs: **Products**, **Orders** and **Reports & health**.
 
 ### Orders (Admin → Orders)
@@ -116,6 +149,10 @@ Each row shows only the moves allowed from its current state:
 - Only the payment gateway can mark an order *Paid*.
 - Open an order to see its payment and full timeline. The same buttons appear there.
 
+![The order board](screenshots/10-admin-orders.png)
+
+![A paid order, seen by an administrator](screenshots/11-admin-order.png)
+
 ### Reports & health (Admin → Reports & health)
 
 - **Figures for the last 7, 30 or 90 days:** revenue, paid orders, units sold and
@@ -132,6 +169,8 @@ Each row shows only the moves allowed from its current state:
   - payment outcomes (sent, approved, declined, duplicates ignored, forged messages
     rejected, late payments refunded);
   - expired reservations.
+
+![Reports and system health](screenshots/12-admin-reports.png)
 
 ## Operators
 

@@ -23,6 +23,10 @@ bench-results/
 # local Claude Code context (kept out of the repo)
 CLAUDE.md
 
+# personal material: the demo-video script, and anything put under private/
+docs/demo-script.md
+private/
+
 # editors
 .vscode/
 .idea/

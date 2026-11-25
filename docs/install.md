@@ -1,7 +1,41 @@
 # Installation guide
 
 Tested on Ubuntu 24.04 with MySQL 8.0 and Apache 2.4. Run everything from the repository
-root.
+root, as your normal user. The scripts call `sudo` only for the system steps.
+
+## Quick install (one command)
+
+```sh
+git clone <repository-url> OrderForge && cd OrderForge
+./scripts/install.sh
+./scripts/run.sh                  # then open http://localhost:8080/
+```
+
+`install.sh` runs sections 1–5 below in order:
+- system packages;
+- database and config file;
+- build and unit tests;
+- demo data, loaded only into an empty database;
+- the Apache site.
+
+It is safe to re-run. The sections below explain each step, for installing by hand or
+when something fails.
+
+### Checking a fresh install
+
+On a new Ubuntu 24.04 virtual machine (2 CPUs and 4 GB is enough):
+
+1. `./scripts/install.sh` ends with "OrderForge is installed." and `unit tests: 12 passed`.
+2. `./scripts/run.sh` prints `all daemons running`.
+3. In a second terminal:
+   - `./build/debug/of-ctl status` shows four daemons `running`;
+   - `./build/debug/of-ctl invariants` prints only `ok` lines.
+4. In a browser on the VM:
+   - <http://localhost:8080/> shows 24 products;
+   - log in as `alice@example.com` / `customer123`;
+   - add an item, place an order with the "always approved" card, and see it become
+     *Paid*.
+5. `tests/integration/api_test.sh` prints `56 passed, 0 failed`.
 
 ## 1. Prerequisites
 

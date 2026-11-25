@@ -17,10 +17,20 @@ Apache.
 | 3 | Order state machine, of-pay (mqueues, HMAC), idempotency, expiry reaper, fulfilment, of-report, dashboards | done (gate 3) |
 | 4 | Write-ahead log, crash recovery, of-supervisor, metrics endpoint, of-ctl status, chaos test | done (gate 4) |
 | 5 | Hardening: rate limits, CSRF/Origin, privilege drop, failure injection, sanitizers, Valgrind | done |
-| 6 | Benchmarks: mixed workloads, hot vs spread SKUs, the five headline experiments, charts, report (gate 5) | **done** |
-| 7 | Documentation, video, slides | next |
+| 6 | Benchmarks: mixed workloads, hot vs spread SKUs, the five headline experiments, charts, report (gate 5) | done |
+| 7 | Final design document, user manual with screenshots, API reference with examples, one-command install | **done** |
 
 ## Quick start
+
+On Ubuntu 24.04, as your normal user:
+
+```sh
+./scripts/install.sh              # packages, database, build, tests, demo data, Apache site
+scripts/run.sh                    # of-supervisor starts and watches every daemon; Ctrl-C stops
+build/debug/of-ctl status         # (another terminal) daemons, engine, WAL, crash recovery
+```
+
+`install.sh` runs these steps, which can also be run one by one:
 
 ```sh
 sudo ./scripts/install-deps.sh    # MySQL, Apache, libfcgi, libsodium, libmysqlclient
@@ -28,8 +38,6 @@ sudo ./scripts/setup-db.sh        # database, user, conf/orderforge.conf (0600)
 make && make test
 ./scripts/load-db.sh              # schema, 24 products, admin and demo accounts
 sudo ./scripts/install-site.sh    # web/ -> /var/www/orderforge, vhost on :8080
-scripts/run.sh                    # of-supervisor starts and watches every daemon; Ctrl-C stops
-build/debug/of-ctl status         # (another terminal) daemons, engine, WAL, crash recovery
 ```
 
 Then open <http://localhost:8080/>.
@@ -110,7 +118,7 @@ scripts/oversell-experiment.sh     # resets the DB and runs all three stock mode
 
 The lock-free mode rejects the 950 losing buyers with one compare-and-swap each, without
 touching MySQL. Method, hardware and analysis are in
-[docs/design.md](docs/design.md#11-results-so-far).
+[docs/design.md](docs/design.md#11-results-at-each-gate).
 
 ## Payments and order tracking (gate 3)
 
@@ -175,7 +183,7 @@ Method, hardware, charts and limitations: [docs/benchmark-report.md](docs/benchm
 - [docs/api.md](docs/api.md): API reference
 - [docs/security-review.md](docs/security-review.md): security review, endpoint by endpoint
 - [docs/benchmark-report.md](docs/benchmark-report.md): benchmark report, with raw results in [docs/benchmarks/](docs/benchmarks/)
-- [docs/user-manual.md](docs/user-manual.md): customer and admin guide
+- [docs/user-manual.md](docs/user-manual.md): customer and admin guide, with screenshots
 
 ## Build modes
 
